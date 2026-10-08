@@ -130,36 +130,274 @@ function RecentReports() {
 }
 
 function ReportDamage() {
-  const nav=useNavigate();
-  const [form,setForm]=useState({damage_type:"Wall Crack",description:"",latitude:"16.5062",longitude:"80.6480",address:"MG Road, Vijayawada"});
-  const [file,setFile]=useState(null); const [busy,setBusy]=useState(false); const [msg,setMsg]=useState("");
-  async function submit(e){e.preventDefault();setBusy(true);setMsg("");
-    try{
-      const body={...form,latitude:Number(form.latitude),longitude:Number(form.longitude)};
-      const r=await api("/reports",{method:"POST",body:JSON.stringify(body)});
-      if(file){const fd=new FormData();fd.append("file",file);await fetch(`${API}/reports/${r.id}/image`,{method:"POST",body:fd});}
-      const a=await api(`/ai/analyze/${r.id}`,{method:"POST"});
-      nav(`/analysis/${r.id}`);
-    }catch(err){setMsg(err.message||"Could not submit report.");}
-    finally{setBusy(false);}
+  const nav = useNavigate();
+
+  const [form, setForm] = useState({
+    damage_type: "Wall Crack",
+    description: "",
+    latitude: "16.5062",
+    longitude: "80.6480",
+    address: "MG Road, Vijayawada"
+  });
+
+  const [file, setFile] = useState(null);
+  const [preview, setPreview] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  function handleFile(e) {
+    const selected = e.target.files[0];
+
+    if (!selected) return;
+
+    if (!selected.type.startsWith("image/")) {
+      setMsg("Please upload an image file.");
+      return;
+    }
+
+    if (selected.size > 10 * 1024 * 1024) {
+      setMsg("Image must be smaller than 10 MB.");
+      return;
+    }
+
+    setFile(selected);
+    setPreview(URL.createObjectURL(selected));
+    setMsg("");
   }
-  return <><div className="page-head"><div><h2>Report Building Damage</h2><p>Upload clear evidence and the system will assist with preliminary analysis.</p></div></div>
-  <form className="card form-card" onSubmit={submit}>
-    <div className="upload" onClick={()=>document.getElementById("photo").click()}>
-      {file?<div className="file-name">✓ {file.name}</div>:<><div className="upload-icon">▧</div><b>Capture or upload photo</b><span>JPG, PNG up to 10 MB • Multiple views recommended</span></>}
-      <input id="photo" type="file" accept="image/*" hidden onChange={e=>setFile(e.target.files[0])}/>
-    </div>
-    <div className="form-grid">
-      <label>Damage type<select value={form.damage_type} onChange={e=>setForm({...form,damage_type:e.target.value})}>{["Wall Crack","Structural Crack","Damaged Plaster","Water Leakage","Damaged Balcony","Damaged Roof","Exposed Wiring","Broken Windows","Other Visible Hazard"].map(x=><option key={x}>{x}</option>)}</select></label>
-      <label>Building address<input value={form.address} onChange={e=>setForm({...form,address:e.target.value})}/></label>
-      <label>Latitude<input value={form.latitude} onChange={e=>setForm({...form,latitude:e.target.value})}/></label>
-      <label>Longitude<input value={form.longitude} onChange={e=>setForm({...form,longitude:e.target.value})}/></label>
-      <label className="full">Description<textarea rows="5" placeholder="Describe what you can see..." value={form.description} onChange={e=>setForm({...form,description:e.target.value})}/></label>
-    </div>
-    <div className="location-box">⌖ <div><b>Location captured</b><span>{form.latitude}, {form.longitude}</span></div><button type="button" className="secondary" onClick={()=>navigator.geolocation?.getCurrentPosition(p=>setForm({...form,latitude:p.coords.latitude.toFixed(6),longitude:p.coords.longitude.toFixed(6)}))}>Use my location</button></div>
-    {msg&&<div className="error">{msg}</div>}
-    <button className="primary wide" disabled={busy}>{busy?"Analyzing…":"✦ Analyze & Submit Report"}</button>
-  </form></>
+
+  async function submit(e) {
+    e.preventDefault();
+
+    if (!file) {
+      setMsg("Please upload a building image first.");
+      return;
+    }
+
+    if (!form.description.trim()) {
+      setMsg("Please describe the visible problem.");
+      return;
+    }
+
+    setBusy(true);
+    setMsg("");
+
+    try {
+      const body = {
+        ...form,
+        latitude: Number(form.latitude),
+        longitude: Number(form.longitude)
+      };
+
+      const r = await api("/reports", {
+        method: "POST",
+        body: JSON.stringify(body)
+      });
+
+      const fd = new FormData();
+      fd.append("file", file);
+
+      await fetch(`${API}/reports/${r.id}/image`, {
+        method: "POST",
+        body: fd
+      });
+
+      await api(`/ai/analyze/${r.id}`, {
+        method: "POST"
+      });
+
+      nav(`/analysis/${r.id}`);
+
+    } catch (err) {
+      setMsg(err.message || "Could not submit report.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <div className="page-head">
+        <div>
+          <h2>Report Building Damage</h2>
+          <p>
+            Upload clear evidence and provide the location and details
+            of the visible building problem.
+          </p>
+        </div>
+      </div>
+
+      <form className="card form-card" onSubmit={submit}>
+
+        {/* IMAGE UPLOAD */}
+        <div
+          className="upload"
+          onClick={() => document.getElementById("photo").click()}
+        >
+          {preview ? (
+            <div className="image-preview">
+              <img src={preview} alt="Building defect preview" />
+              <div className="file-name">
+                ✓ {file.name}
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="upload-icon">▧</div>
+              <b>Capture or upload building photo</b>
+              <span>
+                JPG, PNG up to 10 MB
+              </span>
+            </>
+          )}
+
+          <input
+            id="photo"
+            type="file"
+            accept="image/*"
+            hidden
+            onChange={handleFile}
+          />
+        </div>
+
+        {/* REPORT DETAILS */}
+        <div className="form-grid">
+
+          <label>
+            Damage type
+            <select
+              value={form.damage_type}
+              onChange={e =>
+                setForm({
+                  ...form,
+                  damage_type: e.target.value
+                })
+              }
+            >
+              {[
+                "Wall Crack",
+                "Structural Crack",
+                "Damaged Plaster",
+                "Water Leakage",
+                "Damaged Balcony",
+                "Damaged Roof",
+                "Exposed Wiring",
+                "Broken Windows",
+                "Other Visible Hazard"
+              ].map(x => (
+                <option key={x}>{x}</option>
+              ))}
+            </select>
+          </label>
+
+          <label>
+            Building address
+            <input
+              value={form.address}
+              onChange={e =>
+                setForm({
+                  ...form,
+                  address: e.target.value
+                })
+              }
+            />
+          </label>
+
+          <label>
+            Latitude
+            <input
+              value={form.latitude}
+              onChange={e =>
+                setForm({
+                  ...form,
+                  latitude: e.target.value
+                })
+              }
+            />
+          </label>
+
+          <label>
+            Longitude
+            <input
+              value={form.longitude}
+              onChange={e =>
+                setForm({
+                  ...form,
+                  longitude: e.target.value
+                })
+              }
+            />
+          </label>
+
+          <label className="full">
+            Description
+            <textarea
+              rows="5"
+              placeholder="Describe what you can see..."
+              value={form.description}
+              onChange={e =>
+                setForm({
+                  ...form,
+                  description: e.target.value
+                })
+              }
+            />
+          </label>
+
+        </div>
+
+        {/* LOCATION */}
+        <div className="location-box">
+          ⌖
+
+          <div>
+            <b>Location captured</b>
+            <span>
+              {form.latitude}, {form.longitude}
+            </span>
+          </div>
+
+          <button
+            type="button"
+            className="secondary"
+            onClick={() =>
+              navigator.geolocation?.getCurrentPosition(
+                p =>
+                  setForm({
+                    ...form,
+                    latitude: p.coords.latitude.toFixed(6),
+                    longitude: p.coords.longitude.toFixed(6)
+                  }),
+                () =>
+                  setMsg(
+                    "Unable to access your location. Please enter it manually."
+                  )
+              )
+            }
+          >
+            Use my location
+          </button>
+        </div>
+
+        {/* MESSAGE */}
+        {msg && (
+          <div className="error">
+            {msg}
+          </div>
+        )}
+
+        {/* SUBMIT */}
+        <button
+          className="primary wide"
+          disabled={busy}
+        >
+          {busy
+            ? "Analyzing..."
+            : "✦ Analyze & Submit Report"}
+        </button>
+
+      </form>
+    </>
+  );
 }
 
 function Analysis() {
