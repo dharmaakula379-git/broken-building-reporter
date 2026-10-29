@@ -1431,23 +1431,39 @@ function ReportDetails() {
         <section className="card">
 
           <div className="report-visual">
+  {r.image_path ? (
+    <img
+      src={
+        r.image_path.startsWith("http://") ||
+        r.image_path.startsWith("https://")
+          ? r.image_path
+          : `https://broken-building-reporter-api.onrender.com${r.image_path}`
+      }
+      alt="Uploaded building damage"
+      style={{
+        width: "100%",
+        maxHeight: "320px",
+        objectFit: "contain",
+        borderRadius: "12px"
+      }}
+      onError={(e) => {
+        e.currentTarget.style.display = "none";
+      }}
+    />
+  ) : (
+    <div className="fake-building">
+      🏢
+    </div>
+  )}
 
-            <div className="fake-building">
-              🏢
-            </div>
-
-            <div>
-
-              <b>
-                {r.damage_type}
-              </b>
-
-              <span>
-                {r.description ||
-                  "Visible building damage reported by citizen."}
-              </span>
-
-            </div>
+  <div>
+    <b>{r.damage_type}</b>
+    <span>
+      {r.description ||
+        "Visible building damage reported by citizen."}
+    </span>
+  </div>
+</div>
 
           </div>
 
