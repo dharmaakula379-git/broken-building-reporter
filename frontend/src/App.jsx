@@ -656,13 +656,20 @@ function ReportDamage() {
       const fd = new FormData();
       fd.append("file", file);
 
-      await fetch(
-        `${API}/reports/${r.id}/image`,
-        {
-          method: "POST",
-          body: fd
-        }
-      );
+      const imageResponse = await fetch(
+  `${API}/reports/${r.id}/image`,
+  {
+    method: "POST",
+    body: fd
+  }
+);
+
+if (!imageResponse.ok) {
+  const errorText = await imageResponse.text();
+  throw new Error(
+    `Image upload failed (${imageResponse.status}): ${errorText}`
+  );
+}
 
       await api(
         `/ai/analyze/${r.id}`,
