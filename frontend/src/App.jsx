@@ -1472,7 +1472,6 @@ function ReportDetails() {
   </div>
 </div>
 
-          </div>
 
           <div className="detail-grid">
 
