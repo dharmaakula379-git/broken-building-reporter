@@ -1,29 +1,90 @@
-from pathlib import Path
-import hashlib
 
-def analyze_image(image_path: str|None, damage_type: str, description: str=""):
-    # Demo inference layer. Replace this function with a trained YOLO/OpenCV model.
-    seed = hashlib.md5((str(image_path)+damage_type+description).encode()).hexdigest()
-    value = int(seed[:2], 16)
-    confidence = 62 + (value % 35)  # 62-96
-    if damage_type in {"Structural Crack","Damaged Balcony","Damaged Roof"}:
-        severity = "High"
-    elif damage_type in {"Wall Crack","Water Leakage","Exposed Wiring"}:
-        severity = "Medium"
+from pathlib import Path
+from ultralytics import YOLO
+
+# Load trained YOLO model
+MODEL_PATH7 = Path(__file__).resolve().parent.parent / "best.pt"
+model7 = YOLO(str(MODEL_PATH7))
+
+# Supported damage categories
+CLASS_MAP7 = {
+    "structural crack": "crack",
+    "wall crack": "crack",
+    "crack": "crack",
+    "water leakage": "water_leakage",
+    "exposed wiring": "exposed_wire",
+    "exposed wire": "exposed_wire"
+}
+
+def analyze_image(image_path: str | None, damage_type: str, description: str = ""):
+
+    if not image_path or not Path(image_path).is_file():
+        return {
+            "damage_type": damage_type,
+            "confidence": 0,
+            "severity": "Inspection Required",
+            "priority_score": 45,
+            "recommendation": "Image unavailable. Professional inspection required."
+        }
+
+    target7 = CLASS_MAP7.get(damage_type.lower())
+
+    if target7 is None:
+        return {
+            "damage_type": damage_type,
+            "confidence": 0,
+            "severity": "Inspection Required",
+            "priority_score": 45,
+            "recommendation": "Unsupported damage category. Professional inspection required."
+        }
+
+    results7 = model7.predict(
+        source=image_path,
+        conf=0.25,
+        verbose=False
+    )
+
+    confidence7 = 0
+
+    for result7 in results7:
+        for box7 in result7.boxes:
+            class_id7 = int(box7.cls[0])
+            class_name7 = result7.names[class_id7]
+            score7 = float(box7.conf[0])
+
+            if class_name7 == target7:
+                confidence7 = max(confidence7, score7)
+
+    confidence7 = round(confidence7 * 100)
+
+    if confidence7 >= 70:
+        severity7 = "High"
+    elif confidence7 >= 40:
+        severity7 = "Medium"
+    elif confidence7 > 0:
+        severity7 = "Low"
     else:
-        severity = "Low"
-    if confidence < 70:
-        severity = "Inspection Required"
-    base = {"High":82,"Medium":58,"Low":30,"Inspection Required":45}[severity]
-    priority = min(100, base + (confidence//10))
+        severity7 = "Inspection Required"
+
+    base7 = {
+        "High": 82,
+        "Medium": 58,
+        "Low": 30,
+        "Inspection Required": 45
+    }[severity7]
+
+    priority7 = min(100, base7 + confidence7 // 10)
+
+    recommendation7 = (
+        "YOLO detected the reported damage. Professional inspection recommended."
+        if confidence7 > 0 else
+        "No matching damage detected. Professional inspection required."
+    )
+
     return {
         "damage_type": damage_type,
-        "confidence": confidence,
-        "severity": severity,
-        "priority_score": priority,
-        "recommendation": (
-            "Low-confidence image. Professional inspection required."
-            if confidence < 70 else
-            "Professional inspection recommended for final structural assessment."
-        )
+        "confidence": confidence7,
+        "severity": severity7,
+        "priority_score": priority7,
+        "recommendation": recommendation7
     }
