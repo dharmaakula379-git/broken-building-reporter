@@ -1,12 +1,17 @@
 
 from pathlib import Path
 from ultralytics import YOLO
+import logging
 
-# Load trained YOLO model
+logger7 = logging.getLogger("uvicorn.error")
+
 MODEL_PATH7 = Path(__file__).resolve().parent.parent / "best.pt"
+
+if not MODEL_PATH7.is_file():
+    raise FileNotFoundError(f"YOLO model not found: {MODEL_PATH7}")
+
 model7 = YOLO(str(MODEL_PATH7))
 
-# Supported damage categories
 CLASS_MAP7 = {
     "structural crack": "crack",
     "wall crack": "crack",
@@ -18,7 +23,13 @@ CLASS_MAP7 = {
 
 def analyze_image(image_path: str | None, damage_type: str, description: str = ""):
 
+    logger7.info("========== YOLO DIAGNOSTICS ==========")
+    logger7.info("Image path: %s", image_path)
+    logger7.info("Model classes: %s", model7.names)
+    logger7.info("Selected damage: %s", damage_type)
+
     if not image_path or not Path(image_path).is_file():
+        logger7.error("IMAGE FILE NOT FOUND")
         return {
             "damage_type": damage_type,
             "confidence": 0,
@@ -27,64 +38,88 @@ def analyze_image(image_path: str | None, damage_type: str, description: str = "
             "recommendation": "Image unavailable. Professional inspection required."
         }
 
-    target7 = CLASS_MAP7.get(damage_type.lower())
+    image7 = Path(image_path)
+    logger7.info("Image size: %s bytes", image7.stat().st_size)
 
-    if target7 is None:
+    target7 = CLASS_MAP7.get(damage_type.strip().lower())
+
+    logger7.info("Expected model class: %s", target7)
+
+    try:
+        results7 = model7.predict(
+            source=str(image7),
+            conf=0.05,
+            imgsz=640,
+            verbose=False
+        )
+
+        detections7 = []
+
+        for result7 in results7:
+            for box7 in result7.boxes:
+                class_id7 = int(box7.cls[0])
+                class_name7 = str(result7.names[class_id7]).strip().lower()
+                score7 = float(box7.conf[0])
+
+                detections7.append({
+                    "class": class_name7,
+                    "confidence": round(score7 * 100, 2)
+                })
+
+                logger7.info(
+                    "DETECTION: class=%s confidence=%.2f%%",
+                    class_name7,
+                    score7 * 100
+                )
+
+        logger7.info("ALL DETECTIONS: %s", detections7)
+
+        matching7 = [
+            item7 for item7 in detections7
+            if item7["class"] == target7
+        ]
+
+        confidence7 = max(
+            [item7["confidence"] for item7 in matching7],
+            default=0
+        )
+
+        logger7.info("MATCHING DETECTIONS: %s", matching7)
+        logger7.info("FINAL CONFIDENCE: %s%%", confidence7)
+        logger7.info("======================================")
+
+        if confidence7 >= 70:
+            severity7 = "High"
+        elif confidence7 >= 40:
+            severity7 = "Medium"
+        elif confidence7 > 0:
+            severity7 = "Low"
+        else:
+            severity7 = "Inspection Required"
+
+        base7 = {
+            "High": 82,
+            "Medium": 58,
+            "Low": 30,
+            "Inspection Required": 45
+        }[severity7]
+
+        priority7 = min(100, base7 + int(confidence7 // 10))
+
+        recommendation7 = (
+            "YOLO detected the reported damage. Professional inspection recommended."
+            if confidence7 > 0 else
+            "No matching damage detected. Professional inspection required."
+        )
+
         return {
             "damage_type": damage_type,
-            "confidence": 0,
-            "severity": "Inspection Required",
-            "priority_score": 45,
-            "recommendation": "Unsupported damage category. Professional inspection required."
+            "confidence": round(confidence7),
+            "severity": severity7,
+            "priority_score": priority7,
+            "recommendation": recommendation7
         }
 
-    results7 = model7.predict(
-        source=image_path,
-        conf=0.25,
-        verbose=False
-    )
-
-    confidence7 = 0
-
-    for result7 in results7:
-        for box7 in result7.boxes:
-            class_id7 = int(box7.cls[0])
-            class_name7 = result7.names[class_id7]
-            score7 = float(box7.conf[0])
-
-            if class_name7 == target7:
-                confidence7 = max(confidence7, score7)
-
-    confidence7 = round(confidence7 * 100)
-
-    if confidence7 >= 70:
-        severity7 = "High"
-    elif confidence7 >= 40:
-        severity7 = "Medium"
-    elif confidence7 > 0:
-        severity7 = "Low"
-    else:
-        severity7 = "Inspection Required"
-
-    base7 = {
-        "High": 82,
-        "Medium": 58,
-        "Low": 30,
-        "Inspection Required": 45
-    }[severity7]
-
-    priority7 = min(100, base7 + confidence7 // 10)
-
-    recommendation7 = (
-        "YOLO detected the reported damage. Professional inspection recommended."
-        if confidence7 > 0 else
-        "No matching damage detected. Professional inspection required."
-    )
-
-    return {
-        "damage_type": damage_type,
-        "confidence": confidence7,
-        "severity": severity7,
-        "priority_score": priority7,
-        "recommendation": recommendation7
-    }
+    except Exception:
+        logger7.exception("YOLO INFERENCE FAILED")
+        raise
