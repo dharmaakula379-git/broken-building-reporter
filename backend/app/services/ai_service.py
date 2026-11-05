@@ -100,7 +100,7 @@ def analyze_image(
         results7 = model7.predict(
     source=str(image7),
     conf=0.01,
-    imgsz=320,
+    imgsz=256,
     device="cpu",
     max_det=20,
     verbose=False
