@@ -6,17 +6,43 @@ import time
 
 logger7 = logging.getLogger("uvicorn.error")
 
-# Load YOLO model
+# ==========================================
+# LOAD YOLO MODEL
+# ==========================================
+
 MODEL_PATH7 = Path(__file__).resolve().parent.parent / "best.pt"
 
 if not MODEL_PATH7.is_file():
-    raise FileNotFoundError(f"YOLO model not found: {MODEL_PATH7}")
+    raise FileNotFoundError(
+        f"YOLO model not found: {MODEL_PATH7}"
+    )
 
 model7 = YOLO(str(MODEL_PATH7))
-logger7.info("YOLO MODEL TYPE: %s", model7.model.__class__.__name__)
+
+# Model diagnostics
+logger7.info(
+    "YOLO MODEL TYPE: %s",
+    model7.model.__class__.__name__
+)
+
 logger7.info("YOLO MODEL TASK: %s", model7.task)
 
-# Map user-selected damage types to YOLO classes
+logger7.info("MODEL CONFIG: %s", model7.model.yaml)
+
+logger7.info(
+    "MODEL LAYERS: %s",
+    len(model7.model.model)
+)
+
+logger7.info(
+    "MODEL FILE SIZE: %.2f MB",
+    MODEL_PATH7.stat().st_size / (1024 * 1024)
+)
+
+# ==========================================
+# DAMAGE CLASS MAPPING
+# ==========================================
+
 CLASS_MAP7 = {
     "structural crack": "crack",
     "wall crack": "crack",
@@ -26,6 +52,10 @@ CLASS_MAP7 = {
     "exposed wire": "exposed_wire"
 }
 
+
+# ==========================================
+# AI IMAGE ANALYSIS
+# ==========================================
 
 def analyze_image(
     image_path: str | None,
@@ -40,6 +70,7 @@ def analyze_image(
 
     # Check image availability
     if not image_path or not Path(image_path).is_file():
+
         logger7.error("IMAGE FILE NOT FOUND")
 
         return {
@@ -54,15 +85,27 @@ def analyze_image(
 
     image7 = Path(image_path)
 
-    logger7.info("Image size: %s bytes", image7.stat().st_size)
+    logger7.info(
+        "Image size: %s bytes",
+        image7.stat().st_size
+    )
 
     # Find corresponding YOLO class
-    target7 = CLASS_MAP7.get(damage_type.strip().lower())
+    target7 = CLASS_MAP7.get(
+        damage_type.strip().lower()
+    )
 
-    logger7.info("Expected model class: %s", target7)
+    logger7.info(
+        "Expected model class: %s",
+        target7
+    )
 
     if target7 is None:
-        logger7.warning("UNSUPPORTED DAMAGE TYPE: %s", damage_type)
+
+        logger7.warning(
+            "UNSUPPORTED DAMAGE TYPE: %s",
+            damage_type
+        )
 
         return {
             "damage_type": damage_type,
@@ -86,28 +129,37 @@ def analyze_image(
     )
 
     if target_id7 is None:
-        logger7.error("MODEL CLASS NOT FOUND: %s", target7)
 
-        raise ValueError(f"YOLO model does not contain class: {target7}")
+        logger7.error(
+            "MODEL CLASS NOT FOUND: %s",
+            target7
+        )
 
-    logger7.info("TARGET CLASS ID: %s", target_id7)
+        raise ValueError(
+            f"YOLO model does not contain class: {target7}"
+        )
+
+    logger7.info(
+        "TARGET CLASS ID: %s",
+        target_id7
+    )
 
     try:
+
         # Start inference timer
         start_time7 = time.perf_counter()
 
         logger7.info("YOLO INFERENCE STARTED")
 
-        # Optimized YOLO inference
+        # Optimized diagnostic inference
         results7 = model7.predict(
-    source=str(image7),
-    conf=0.01,
-    imgsz=256,
-    device="cpu",
-    max_det=20,
-    verbose=False
-)
-        
+            source=str(image7),
+            conf=0.01,
+            imgsz=256,
+            device="cpu",
+            max_det=20,
+            verbose=False
+        )
 
         elapsed7 = time.perf_counter() - start_time7
 
@@ -120,8 +172,11 @@ def analyze_image(
         detections7 = []
 
         for result7 in results7:
+
             for box7 in result7.boxes:
+
                 class_id7 = int(box7.cls[0])
+
                 class_name7 = str(
                     result7.names[class_id7]
                 ).strip().lower()
@@ -130,7 +185,10 @@ def analyze_image(
 
                 detections7.append({
                     "class": class_name7,
-                    "confidence": round(score7 * 100, 2)
+                    "confidence": round(
+                        score7 * 100,
+                        2
+                    )
                 })
 
                 logger7.info(
@@ -139,11 +197,15 @@ def analyze_image(
                     score7 * 100
                 )
 
-        logger7.info("ALL DETECTIONS: %s", detections7)
+        logger7.info(
+            "ALL DETECTIONS: %s",
+            detections7
+        )
 
         # Match selected damage category
         matching7 = [
-            item7 for item7 in detections7
+            item7
+            for item7 in detections7
             if item7["class"] == target7
         ]
 
@@ -155,17 +217,30 @@ def analyze_image(
             default=0
         )
 
-        logger7.info("MATCHING DETECTIONS: %s", matching7)
-        logger7.info("FINAL CONFIDENCE: %.2f%%", confidence7)
-        logger7.info("======================================")
+        logger7.info(
+            "MATCHING DETECTIONS: %s",
+            matching7
+        )
+
+        logger7.info(
+            "FINAL CONFIDENCE: %.2f%%",
+            confidence7
+        )
+
+        logger7.info(
+            "======================================"
+        )
 
         # Determine severity
         if confidence7 >= 70:
             severity7 = "High"
+
         elif confidence7 >= 40:
             severity7 = "Medium"
+
         elif confidence7 > 0:
             severity7 = "Low"
+
         else:
             severity7 = "Inspection Required"
 
@@ -201,5 +276,9 @@ def analyze_image(
         }
 
     except Exception:
-        logger7.exception("YOLO INFERENCE FAILED")
+
+        logger7.exception(
+            "YOLO INFERENCE FAILED"
+        )
+
         raise
