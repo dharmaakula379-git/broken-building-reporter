@@ -2,9 +2,11 @@
 from pathlib import Path
 from ultralytics import YOLO
 import logging
+import time
 
 logger7 = logging.getLogger("uvicorn.error")
 
+# Load YOLO model
 MODEL_PATH7 = Path(__file__).resolve().parent.parent / "best.pt"
 
 if not MODEL_PATH7.is_file():
@@ -12,6 +14,7 @@ if not MODEL_PATH7.is_file():
 
 model7 = YOLO(str(MODEL_PATH7))
 
+# Map user-selected damage types to YOLO classes
 CLASS_MAP7 = {
     "structural crack": "crack",
     "wall crack": "crack",
@@ -21,53 +24,106 @@ CLASS_MAP7 = {
     "exposed wire": "exposed_wire"
 }
 
-def analyze_image(image_path: str | None, damage_type: str, description: str = ""):
+
+def analyze_image(
+    image_path: str | None,
+    damage_type: str,
+    description: str = ""
+):
 
     logger7.info("========== YOLO DIAGNOSTICS ==========")
     logger7.info("Image path: %s", image_path)
     logger7.info("Model classes: %s", model7.names)
     logger7.info("Selected damage: %s", damage_type)
 
+    # Check image availability
     if not image_path or not Path(image_path).is_file():
         logger7.error("IMAGE FILE NOT FOUND")
+
         return {
             "damage_type": damage_type,
             "confidence": 0,
             "severity": "Inspection Required",
             "priority_score": 45,
-            "recommendation": "Image unavailable. Professional inspection required."
+            "recommendation": (
+                "Image unavailable. Professional inspection required."
+            )
         }
 
     image7 = Path(image_path)
+
     logger7.info("Image size: %s bytes", image7.stat().st_size)
 
+    # Find corresponding YOLO class
     target7 = CLASS_MAP7.get(damage_type.strip().lower())
 
     logger7.info("Expected model class: %s", target7)
 
-    try:
-        import time
+    if target7 is None:
+        logger7.warning("UNSUPPORTED DAMAGE TYPE: %s", damage_type)
 
-        start_time7 = time.time()
+        return {
+            "damage_type": damage_type,
+            "confidence": 0,
+            "severity": "Inspection Required",
+            "priority_score": 45,
+            "recommendation": (
+                "This damage category is not supported by the AI model. "
+                "Professional inspection required."
+            )
+        }
+
+    # Find YOLO class ID
+    target_id7 = next(
+        (
+            int(class_id7)
+            for class_id7, class_name7 in model7.names.items()
+            if str(class_name7).strip().lower() == target7
+        ),
+        None
+    )
+
+    if target_id7 is None:
+        logger7.error("MODEL CLASS NOT FOUND: %s", target7)
+
+        raise ValueError(f"YOLO model does not contain class: {target7}")
+
+    logger7.info("TARGET CLASS ID: %s", target_id7)
+
+    try:
+        # Start inference timer
+        start_time7 = time.perf_counter()
+
         logger7.info("YOLO INFERENCE STARTED")
 
+        # Optimized YOLO inference
         results7 = model7.predict(
-        source=str(image7),
-        conf=0.05,
-        imgsz=416,
-        device="cpu",
-        verbose=False
+            source=str(image7),
+            conf=0.10,
+            imgsz=320,
+            device="cpu",
+            classes=[target_id7],
+            max_det=20,
+            verbose=False
         )
 
-        elapsed7 = time.time() - start_time7
-        logger7.info("YOLO INFERENCE COMPLETED IN %.2f SECONDS", elapsed7)
+        elapsed7 = time.perf_counter() - start_time7
 
+        logger7.info(
+            "YOLO INFERENCE COMPLETED IN %.2f SECONDS",
+            elapsed7
+        )
+
+        # Collect detections
         detections7 = []
 
         for result7 in results7:
             for box7 in result7.boxes:
                 class_id7 = int(box7.cls[0])
-                class_name7 = str(result7.names[class_id7]).strip().lower()
+                class_name7 = str(
+                    result7.names[class_id7]
+                ).strip().lower()
+
                 score7 = float(box7.conf[0])
 
                 detections7.append({
@@ -83,20 +139,25 @@ def analyze_image(image_path: str | None, damage_type: str, description: str = "
 
         logger7.info("ALL DETECTIONS: %s", detections7)
 
+        # Match selected damage category
         matching7 = [
             item7 for item7 in detections7
             if item7["class"] == target7
         ]
 
         confidence7 = max(
-            [item7["confidence"] for item7 in matching7],
+            (
+                item7["confidence"]
+                for item7 in matching7
+            ),
             default=0
         )
 
         logger7.info("MATCHING DETECTIONS: %s", matching7)
-        logger7.info("FINAL CONFIDENCE: %s%%", confidence7)
+        logger7.info("FINAL CONFIDENCE: %.2f%%", confidence7)
         logger7.info("======================================")
 
+        # Determine severity
         if confidence7 >= 70:
             severity7 = "High"
         elif confidence7 >= 40:
@@ -106,6 +167,7 @@ def analyze_image(image_path: str | None, damage_type: str, description: str = "
         else:
             severity7 = "Inspection Required"
 
+        # Calculate priority
         base7 = {
             "High": 82,
             "Medium": 58,
@@ -113,12 +175,19 @@ def analyze_image(image_path: str | None, damage_type: str, description: str = "
             "Inspection Required": 45
         }[severity7]
 
-        priority7 = min(100, base7 + int(confidence7 // 10))
+        priority7 = min(
+            100,
+            base7 + int(confidence7 // 10)
+        )
 
+        # Generate recommendation
         recommendation7 = (
-            "YOLO detected the reported damage. Professional inspection recommended."
-            if confidence7 > 0 else
-            "No matching damage detected. Professional inspection required."
+            "YOLO detected the reported damage. "
+            "Professional inspection recommended."
+            if confidence7 > 0
+            else
+            "No matching damage detected. "
+            "Professional inspection required."
         )
 
         return {
