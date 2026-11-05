@@ -13,6 +13,8 @@ if not MODEL_PATH7.is_file():
     raise FileNotFoundError(f"YOLO model not found: {MODEL_PATH7}")
 
 model7 = YOLO(str(MODEL_PATH7))
+logger7.info("YOLO MODEL TYPE: %s", model7.model.__class__.__name__)
+logger7.info("YOLO MODEL TASK: %s", model7.task)
 
 # Map user-selected damage types to YOLO classes
 CLASS_MAP7 = {
