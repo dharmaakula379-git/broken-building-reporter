@@ -98,14 +98,14 @@ def analyze_image(
 
         # Optimized YOLO inference
         results7 = model7.predict(
-            source=str(image7),
-            conf=0.10,
-            imgsz=320,
-            device="cpu",
-            classes=[target_id7],
-            max_det=20,
-            verbose=False
-        )
+    source=str(image7),
+    conf=0.01,
+    imgsz=320,
+    device="cpu",
+    max_det=20,
+    verbose=False
+)
+        
 
         elapsed7 = time.perf_counter() - start_time7
 
