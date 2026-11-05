@@ -1030,19 +1030,38 @@ function Analysis() {
 
           </div>
 
-          <div className="scan-box">
+   
+<div className="scan-box">
 
-            <div className="fake-crack">
-              ╱╲
-              <br />
-              ╱╲
-            </div>
+  {r.image_path ? (
+    <img
+      src={
+        r.image_path.startsWith("http")
+          ? r.image_path
+          : `https://broken-building-reporter-api.onrender.com/${r.image_path.replace(/^\/+/, "")}`
+      }
+      alt="Uploaded building damage"
+      style={{
+        width: "100%",
+        height: "100%",
+        maxHeight: "320px",
+        objectFit: "contain",
+        borderRadius: "12px"
+      }}
+      onError={(e) => {
+        e.currentTarget.alt = "Uploaded image could not be loaded";
+      }}
+    />
+  ) : (
+    <p>Uploaded image not available.</p>
+  )}
 
-            <span>
-              AI analyzed the visible evidence
-            </span>
+  <span>
+    AI analyzed the uploaded evidence
+  </span>
 
-          </div>
+</div>
+       
 
           {low ? (
 
