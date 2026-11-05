@@ -1,11 +1,15 @@
 
-from pathlib import Path
-from ultralytics import YOLO
 import logging
 import time
+from pathlib import Path
+
+import torch
+from ultralytics import YOLO
+
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
 
 logger7 = logging.getLogger("uvicorn.error")
-
 # ==========================================
 # LOAD YOLO MODEL
 # ==========================================
