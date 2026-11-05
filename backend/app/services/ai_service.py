@@ -46,12 +46,21 @@ def analyze_image(image_path: str | None, damage_type: str, description: str = "
     logger7.info("Expected model class: %s", target7)
 
     try:
+        import time
+
+        start_time7 = time.time()
+        logger7.info("YOLO INFERENCE STARTED")
+
         results7 = model7.predict(
-            source=str(image7),
-            conf=0.05,
-            imgsz=640,
-            verbose=False
+        source=str(image7),
+        conf=0.05,
+        imgsz=416,
+        device="cpu",
+        verbose=False
         )
+
+        elapsed7 = time.time() - start_time7
+        logger7.info("YOLO INFERENCE COMPLETED IN %.2f SECONDS", elapsed7)
 
         detections7 = []
 
