@@ -15,12 +15,53 @@ from sqlalchemy.orm import Session
 from .db import Base, engine, get_db
 from .models import Building, Report
 from .seed import seed
-from .services.ai_service import analyze_image, warmup_model
+from .services.ai_service import analyze_image, warmup_model, _inference_lock
 
 logger = logging.getLogger("uvicorn.error")
 
 UPLOADS = Path("uploads")
 UPLOADS.mkdir(parents=True, exist_ok=True)
+
+# Explicit completed lifecycle statuses that confirm AI analysis was executed.
+AI_COMPLETED_STATUSES = {
+    "AI Verified",
+    "Inspection Required",
+    "Assigned",
+    "Under Inspection",
+    "Repair Pending",
+    "Resolved",
+}
+
+
+def is_analysis_complete(r: Report) -> bool:
+    """
+    Returns True ONLY if the report has an explicit, completed AI analysis result.
+    Guarantees that unanalyzed, in-flight, failed, or partially-written reports
+    are NEVER treated as cached hits.
+    """
+    if r is None:
+        return False
+    if r.confidence is None or r.status == "Reported":
+        return False
+    if r.status not in AI_COMPLETED_STATUSES:
+        return False
+    if r.priority_score is None:
+        return False
+    return True
+
+
+def _cached_report_response(r: Report) -> dict:
+    recommendation = (
+        "YOLO detected the reported damage. Professional inspection recommended."
+        if (r.confidence or 0) > 0
+        else
+        "No matching damage detected. Professional inspection required."
+    )
+    return {
+        "report": report_dict(r),
+        "recommendation": recommendation,
+        "cached": True
+    }
 
 
 @asynccontextmanager
@@ -195,8 +236,10 @@ def create_report(
     return report_dict(r)
 
 
+# Synchronous def ensures file I/O and PIL resizing run in Starlette's threadpool,
+# completely preventing CPU blocking on the asyncio event loop.
 @app.post("/api/reports/{rid}/image")
-async def upload_image(
+def upload_image(
     rid: int,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -215,7 +258,7 @@ async def upload_image(
         with path.open("wb") as output:
             shutil.copyfileobj(file.file, output)
     finally:
-        await file.close()
+        file.file.close()
 
     # Server-side safety optimization:
     # If the image exceeds 1280px on longest edge, scale it down cleanly
@@ -239,55 +282,71 @@ async def upload_image(
     return {"ok": True, "path": f"/uploads/{path.name}"}
 
 
+# Synchronous def ensures that waiting for the inference lock runs in Starlette's
+# threadpool worker thread and NEVER blocks the FastAPI asyncio event loop.
 @app.post("/api/ai/analyze/{rid}")
 def ai_analyze(rid: int, db: Session = Depends(get_db)):
     r = db.query(Report).filter(Report.id == rid).first()
     if not r:
         raise HTTPException(404, "Report not found")
 
-    # Idempotency / Cache check:
-    # If report was already analyzed, return cached result immediately
-    # rather than triggering a redundant 30-40s YOLO inference.
-    if r.confidence is not None and r.status in ("AI Verified", "Inspection Required"):
+    # Double-checked locking — Check 1: Fast path before acquiring the lock
+    if is_analysis_complete(r):
         logger.info(
-            "REPORT %d ALREADY ANALYZED: Returning cached result (confidence=%s%%, status=%s)",
+            "REPORT %d ALREADY ANALYZED (Pre-lock cache hit: confidence=%s%%, status=%s)",
             rid, r.confidence, r.status
         )
-        recommendation = (
-            "YOLO detected the reported damage. Professional inspection recommended."
-            if (r.confidence or 0) > 0
-            else
-            "No matching damage detected. Professional inspection required."
+        return _cached_report_response(r)
+
+    # Acquire inference lock to serialize CPU inference
+    lock_start = time.perf_counter()
+    acquired = _inference_lock.acquire(blocking=True, timeout=120)
+    if not acquired:
+        logger.error("INFERENCE LOCK TIMEOUT for report %d", rid)
+        raise HTTPException(503, "AI inference engine is busy. Please try again.")
+
+    try:
+        # Double-checked locking — Check 2: Re-query DB after acquiring lock.
+        # If another concurrent request analyzed this report while we were waiting
+        # in the queue, return the newly committed result immediately without running YOLO.
+        db.refresh(r)
+        if is_analysis_complete(r):
+            lock_wait = time.perf_counter() - lock_start
+            logger.info(
+                "REPORT %d ALREADY ANALYZED (Post-lock double-check hit: waited %.2fs, confidence=%s%%, status=%s)",
+                rid, lock_wait, r.confidence, r.status
+            )
+            return _cached_report_response(r)
+
+        result = analyze_image(
+            r.image_path,
+            r.damage_type,
+            r.description,
+            lock_already_acquired=True
         )
+
+        r.damage_type = result["damage_type"]
+        r.confidence = result["confidence"]
+        r.severity = result["severity"]
+        r.priority_score = result["priority_score"]
+        r.status = (
+            "AI Verified"
+            if result["confidence"] >= 70
+            else "Inspection Required"
+        )
+
+        db.commit()
+        db.refresh(r)
+
         return {
             "report": report_dict(r),
-            "recommendation": recommendation,
-            "cached": True
+            "recommendation": result["recommendation"],
         }
-
-    result = analyze_image(
-        r.image_path,
-        r.damage_type,
-        r.description
-    )
-
-    r.damage_type = result["damage_type"]
-    r.confidence = result["confidence"]
-    r.severity = result["severity"]
-    r.priority_score = result["priority_score"]
-    r.status = (
-        "AI Verified"
-        if result["confidence"] >= 70
-        else "Inspection Required"
-    )
-
-    db.commit()
-    db.refresh(r)
-
-    return {
-        "report": report_dict(r),
-        "recommendation": result["recommendation"],
-    }
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        _inference_lock.release()
 
 
 @app.put("/api/reports/{rid}/status")

@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import time
 import threading
@@ -9,13 +10,64 @@ import torch
 from ultralytics import YOLO
 from PIL import Image
 
-# Optimize PyTorch CPU threading for cloud container environments.
-# Avoid forcing single-threaded execution (torch.set_num_threads(1)), which artificially
-# crippled CPU matrix operations and caused 80s inference times.
-cpu_count = os.cpu_count() or 2
-num_threads = max(1, min(4, cpu_count))
+
+def _detect_container_cpu_quota() -> int:
+    """
+    Detects the effective CPU quota in Linux container environments (Render, Docker, K8s).
+    Prioritizes Linux cgroups (v2 and v1) bandwidth limits over host core counts or affinity masks,
+    ensuring fractional quotas (e.g., 0.15 - 0.5 CPU) correctly restrict PyTorch to 1 thread.
+    """
+    cfs_quota_cpus = None
+
+    # 1. Linux cgroups v2: /sys/fs/cgroup/cpu.max ($MAX $PERIOD)
+    try:
+        cg_v2 = Path("/sys/fs/cgroup/cpu.max")
+        if cg_v2.is_file():
+            parts = cg_v2.read_text().strip().split()
+            if len(parts) == 2 and parts[0] != "max":
+                quota, period = float(parts[0]), float(parts[1])
+                if period > 0 and quota > 0:
+                    cfs_quota_cpus = quota / period
+    except Exception:
+        pass
+
+    # 2. Linux cgroups v1: cpu.cfs_quota_us & cpu.cfs_period_us
+    if cfs_quota_cpus is None:
+        try:
+            q_path = Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+            p_path = Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+            if q_path.is_file() and p_path.is_file():
+                quota, period = float(q_path.read_text().strip()), float(p_path.read_text().strip())
+                if quota > 0 and period > 0:
+                    cfs_quota_cpus = quota / period
+        except Exception:
+            pass
+
+    # If a cgroup CFS quota is present, respect it directly:
+    # Fractional quotas <= 1.0 (such as Render free tier's 0.15 - 0.5 CPU) MUST yield 1 thread.
+    if cfs_quota_cpus is not None:
+        if cfs_quota_cpus <= 1.0:
+            return 1
+        return max(1, min(2, int(round(cfs_quota_cpus))))
+
+    # 3. Only if no cgroups quota is configured, inspect CPU affinity
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            affinity = len(os.sched_getaffinity(0))
+            if affinity > 0:
+                return max(1, min(2, affinity))
+        except Exception:
+            pass
+
+    # 4. Fallback: clamp host core count to 1-2 threads
+    return max(1, min(2, (os.cpu_count() or 1)))
+
+
+detected_cpus = _detect_container_cpu_quota()
+# On Render free instance (0.15-0.5 CPU quota), limit to at most 2 threads to prevent thrashing
+num_threads = max(1, min(2, detected_cpus))
 torch.set_num_threads(num_threads)
-torch.set_num_interop_threads(max(1, min(2, cpu_count // 2)))
+torch.set_num_interop_threads(1)
 
 logger7 = logging.getLogger("uvicorn.error")
 
@@ -32,8 +84,10 @@ logger7.info("YOLO MODEL TASK: %s", model7.task)
 logger7.info("MODEL CONFIG: %s", getattr(model7.model, "yaml", "custom"))
 logger7.info("MODEL LAYERS: %s", len(getattr(model7.model, "model", [])))
 logger7.info("MODEL FILE SIZE: %.2f MB", MODEL_PATH7.stat().st_size / (1024 * 1024))
-logger7.info("CPU THREADS CONFIGURED: %d (interop: %d, host cpus: %d)",
-             num_threads, max(1, min(2, cpu_count // 2)), cpu_count)
+logger7.info(
+    "CPU THREADS CONFIGURED: %d (detected container quota: %d, host cpus: %s)",
+    num_threads, detected_cpus, os.cpu_count()
+)
 
 # Concurrency control: serialize CPU inference so multiple simultaneous requests
 # do not thrash the fractional CPU and cause timeouts / 5+ minute hangs.
@@ -100,7 +154,8 @@ def _preprocess_image_source(image_path: Path) -> Union[Path, Image.Image]:
 def analyze_image(
     image_path: str | None,
     damage_type: str,
-    description: str = ""
+    description: str = "",
+    lock_already_acquired: bool = False
 ):
     total_start = time.perf_counter()
     logger7.info("========== YOLO DIAGNOSTICS ==========")
@@ -161,19 +216,20 @@ def analyze_image(
     logger7.info("STAGE 1 [PREPROCESSING]: %.3f seconds", prep_time)
 
     # 2. Concurrency Lock: Ensure only one inference runs on CPU at a time
-    lock_start = time.perf_counter()
-    acquired = _inference_lock.acquire(blocking=True, timeout=120)
-    if not acquired:
-        logger7.error("INFERENCE LOCK TIMEOUT: Previous request still holding CPU")
-        raise TimeoutError("Inference engine is currently busy with another request.")
-    lock_wait = time.perf_counter() - lock_start
-    if lock_wait > 0.05:
-        logger7.info("STAGE 2 [LOCK WAIT]: Waited %.3f seconds for CPU lock", lock_wait)
+    need_release = False
+    if not lock_already_acquired:
+        lock_start = time.perf_counter()
+        acquired = _inference_lock.acquire(blocking=True, timeout=120)
+        if not acquired:
+            logger7.error("INFERENCE LOCK TIMEOUT: Previous request still holding CPU")
+            raise TimeoutError("Inference engine is currently busy with another request.")
+        need_release = True
+        lock_wait = time.perf_counter() - lock_start
+        if lock_wait > 0.05:
+            logger7.info("STAGE 2 [LOCK WAIT]: Waited %.3f seconds for CPU lock", lock_wait)
 
     try:
         # 3. YOLO Inference Stage
-        # imgsz=320 is maintained: 256 degrades fine line features for cracks and exposed wires,
-        # while 320 with multi-threading achieves 30-45s CPU inference on Render.
         infer_start = time.perf_counter()
         logger7.info("STAGE 3 [YOLO INFERENCE STARTED] (imgsz=320, conf=0.25, threads=%d)", num_threads)
 
@@ -274,4 +330,5 @@ def analyze_image(
         logger7.exception("YOLO INFERENCE FAILED")
         raise
     finally:
-        _inference_lock.release()
+        if need_release:
+            _inference_lock.release()
