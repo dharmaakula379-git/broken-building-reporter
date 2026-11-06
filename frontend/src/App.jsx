@@ -657,6 +657,7 @@ function ReportDamage() {
     type: "idle",
     message: ""
   });
+  const [geoMatches, setGeoMatches] = useState([]);
   const lastGeocodedAddressRef = useRef("MG Road, Vijayawada");
   const manualCoordsRef = useRef(false);
   const geocodeAbortRef = useRef(null);
@@ -677,6 +678,7 @@ function ReportDamage() {
         geocodeAbortRef.current = null;
       }
       setGeoLoading(false);
+      setGeoMatches([]);
       if (query.length === 0) {
         setGeoStatus({ type: "idle", message: "" });
       } else {
@@ -712,8 +714,13 @@ function ReportDamage() {
       try {
         const result = await fetchGeocode(query, controller.signal);
 
-        // Strict guard: verify this request was NOT aborted AND still matches the latest entered address
-        if (controller.signal.aborted || latestAddressRef.current !== query) {
+        // Strict guard: verify this request was NOT aborted, still matches the latest entered address,
+        // and was not superseded by a manual coordinate edit or location selection
+        if (
+          controller.signal.aborted ||
+          latestAddressRef.current !== query ||
+          manualCoordsRef.current
+        ) {
           return;
         }
 
@@ -730,22 +737,23 @@ function ReportDamage() {
           });
           lastGeocodedAddressRef.current = query;
           manualCoordsRef.current = false;
-          const shortName = result.display_name
-            ? (result.display_name.length > 55
-                ? result.display_name.slice(0, 52) + "..."
-                : result.display_name)
+          setGeoMatches(result.matches || []);
+          const placeTitle = result.name ? result.name : (result.display_name || "");
+          const detail = result.display_name && result.display_name !== placeTitle
+            ? (result.display_name.length > 55 ? result.display_name.slice(0, 52) + "..." : result.display_name)
             : `${result.latitude}, ${result.longitude}`;
           setGeoStatus({
             type: "success",
-            message: `Coordinates located: ${shortName}`
+            message: `Matched: ${placeTitle} (${detail})`
           });
         } else {
+          setGeoMatches([]);
           setGeoStatus({
             type: "error",
             message:
               result.message ||
               result.error ||
-              "Could not find coordinates for this address. Please verify or enter manually."
+              "Could not find a reliable match for this place. Please enter a more complete address or provide coordinates manually."
           });
         }
       } catch (err) {
@@ -1079,13 +1087,14 @@ if (!imageResponse.ok) {
 
             <input
               value={form.address}
-              placeholder="e.g. MG Road, Vijayawada"
+              placeholder="e.g. VR Siddhartha Engineering College, Vijayawada"
               onChange={e => {
                 setForm({
                   ...form,
                   address: e.target.value
                 });
                 manualCoordsRef.current = false;
+                setGeoMatches([]);
               }}
             />
 
@@ -1099,6 +1108,53 @@ if (!imageResponse.ok) {
               </div>
             )}
 
+            {geoMatches.length > 1 && (
+              <div className="geo-matches-box">
+                <div className="geo-matches-header">
+                  Matching locations found — click to select:
+                </div>
+                <div className="geo-matches-list">
+                  {geoMatches.map((m, idx) => {
+                    const isSelected =
+                      Math.abs(Number(form.latitude) - m.latitude) < 0.0001 &&
+                      Math.abs(Number(form.longitude) - m.longitude) < 0.0001;
+                    return (
+                      <button
+                        key={idx}
+                        type="button"
+                        className={`geo-match-item ${isSelected ? "active" : ""}`}
+                        onClick={() => {
+                          if (geocodeAbortRef.current) {
+                            geocodeAbortRef.current.abort();
+                            geocodeAbortRef.current = null;
+                          }
+                          const selectedAddr = m.display_name || m.name || form.address;
+                          lastGeocodedAddressRef.current = selectedAddr.trim();
+                          latestAddressRef.current = selectedAddr.trim();
+                          manualCoordsRef.current = false;
+                          setForm(prev => ({
+                            ...prev,
+                            address: selectedAddr,
+                            latitude: String(m.latitude),
+                            longitude: String(m.longitude)
+                          }));
+                          setGeoStatus({
+                            type: "success",
+                            message: `Selected: ${m.name} (${selectedAddr.slice(0, 50)}...)`
+                          });
+                        }}
+                      >
+                        <div className="geo-match-name">
+                          📍 {m.name} {m.type ? <span className="geo-match-type">({m.type})</span> : null}
+                        </div>
+                        <div className="geo-match-addr">{m.display_name}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
           </label>
 
           <label>
@@ -1107,6 +1163,10 @@ if (!imageResponse.ok) {
             <input
               value={form.latitude}
               onChange={e => {
+                if (geocodeAbortRef.current) {
+                  geocodeAbortRef.current.abort();
+                  geocodeAbortRef.current = null;
+                }
                 setForm({
                   ...form,
                   latitude: e.target.value
@@ -1127,6 +1187,10 @@ if (!imageResponse.ok) {
             <input
               value={form.longitude}
               onChange={e => {
+                if (geocodeAbortRef.current) {
+                  geocodeAbortRef.current.abort();
+                  geocodeAbortRef.current = null;
+                }
                 setForm({
                   ...form,
                   longitude: e.target.value
@@ -1188,18 +1252,22 @@ if (!imageResponse.ok) {
           <button
             type="button"
             className="secondary"
-            onClick={() =>
+            onClick={() => {
+              if (geocodeAbortRef.current) {
+                geocodeAbortRef.current.abort();
+                geocodeAbortRef.current = null;
+              }
               navigator.geolocation?.getCurrentPosition(
                 p => {
                   const latStr = p.coords.latitude.toFixed(6);
                   const lonStr = p.coords.longitude.toFixed(6);
+                  manualCoordsRef.current = true;
+                  lastGeocodedAddressRef.current = form.address.trim();
                   setForm(prev => ({
                     ...prev,
                     latitude: latStr,
                     longitude: lonStr
                   }));
-                  manualCoordsRef.current = true;
-                  lastGeocodedAddressRef.current = form.address.trim();
                   setGeoStatus({
                     type: "info",
                     message: "Device GPS location applied."
@@ -1209,8 +1277,8 @@ if (!imageResponse.ok) {
                   setMsg(
                     "Unable to access your location. Please enter it manually."
                   )
-              )
-            }
+              );
+            }}
           >
             Use my location
           </button>
