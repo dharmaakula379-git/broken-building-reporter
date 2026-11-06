@@ -543,9 +543,9 @@ function RecentReports() {
   );
 }
 
-function compressImageForUpload(file, maxDimension = 1280, quality = 0.85) {
+function compressImageForUpload(file, maxDimension = 1024, quality = 0.78) {
   return new Promise((resolve) => {
-    if (!file || !file.type.startsWith("image/") || file.size < 400 * 1024) {
+    if (!file || !file.type.startsWith("image/") || file.size < 150 * 1024) {
       return resolve(file);
     }
     const img = new Image();
@@ -650,6 +650,11 @@ function ReportDamage() {
   const isSubmittingRef = useRef(false);
   const [stepMsg, setStepMsg] = useState("");
   const [elapsed, setElapsed] = useState(0);
+
+  // Pre-warm backend when citizen opens the report form to wake up sleeping instances (e.g. Render free tier)
+  useEffect(() => {
+    fetch(`${API}/health`, { method: "GET" }).catch(() => {});
+  }, []);
 
   // Address geocoding states
   const [geoLoading, setGeoLoading] = useState(false);
@@ -944,14 +949,7 @@ if (!imageResponse.ok) {
   );
 }
 
-      setStepMsg("Running AI damage detection (typically 20–45s)...");
-      await api(
-        `/ai/analyze/${r.id}`,
-        {
-          method: "POST"
-        }
-      );
-
+      setStepMsg("Report submitted! Navigating to analysis...");
       nav(`/analysis/${r.id}`);
 
     } catch (err) {
@@ -1306,267 +1304,249 @@ if (!imageResponse.ok) {
 }
 
 function Analysis() {
-
   const { id } = useParamsSafe();
   const nav = useNavigate();
   const [r, setR] = useState(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analysisError, setAnalysisError] = useState("");
+  const analysisTriggeredRef = useRef(false);
+
+  const fetchAndProcess = useCallback(async () => {
+    try {
+      const data = await api(`/reports/${id}`);
+      setR(data);
+
+      // If status is still "Reported", genuine AI analysis is pending on the backend
+      if (data.status === "Reported") {
+        if (analysisTriggeredRef.current) {
+          return;
+        }
+        analysisTriggeredRef.current = true;
+        setAnalyzing(true);
+        setAnalysisError("");
+
+        try {
+          const aiRes = await api(`/ai/analyze/${id}`, { method: "POST" });
+          if (aiRes && aiRes.report) {
+            setR({ ...aiRes.report, recommendation: aiRes.recommendation });
+          } else {
+            const updated = await api(`/reports/${id}`);
+            setR(updated);
+          }
+        } catch (err) {
+          console.error("AI Analysis error:", err);
+          analysisTriggeredRef.current = false;
+          setAnalysisError(err.message || "AI inference took longer than expected. Please retry.");
+        } finally {
+          setAnalyzing(false);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to load report:", err);
+    }
+  }, [id]);
 
   useEffect(() => {
-
-    api(`/reports/${id}`)
-      .then(setR)
-      .catch(() => {});
-
-  }, [id]);
+    fetchAndProcess();
+  }, [fetchAndProcess]);
 
   if (!r) {
     return <Loading />;
   }
 
-  const confidence =
-    Number(r.confidence || 0);
-
+  const confidence = Number(r.confidence || 0);
   const low = confidence < 70;
+  const imageBaseUrl = API.replace(/\/api$/, "");
+  const imageSrc = r.image_path
+    ? (r.image_path.startsWith("http")
+        ? r.image_path
+        : `${imageBaseUrl}/${r.image_path.replace(/^\/+/, "")}`)
+    : null;
 
   return (
     <>
       <div className="page-head">
-
         <div>
-
-          <h2>
-            AI Analysis Result
-          </h2>
-
+          <h2>AI Analysis Result</h2>
           <p>
-            AI-assisted assessment of the
-            visible building evidence.
+            {analyzing
+              ? "Running YOLO neural network defect detection on server..."
+              : "AI-assisted assessment of the visible building evidence."}
           </p>
-
         </div>
-
       </div>
 
       <div className="analysis-grid">
-
         <section className="card">
-
           <div className="analysis-title">
-
             <div>
-
-              <span>
-                Visible defect detected
-              </span>
-
-              <h1>
-                {r.damage_type ||
-                  "Unknown Defect"}
-              </h1>
-
+              <span>{analyzing ? "Backend Inference In Progress" : "Visible defect detected"}</span>
+              <h1>{analyzing ? "Processing Image..." : (r.damage_type || "Unknown Defect")}</h1>
             </div>
 
             <Badge
               tone={
-                r.severity === "High"
+                analyzing
+                  ? "warning"
+                  : r.severity === "High"
                   ? "danger"
                   : r.severity === "Medium"
                   ? "warning"
                   : "success"
               }
             >
-              {r.severity || "Unknown"}
+              {analyzing ? "Analyzing" : (r.severity || "Unknown")}
             </Badge>
-
           </div>
 
-          <div className="metrics">
-
-            <div>
-              <span>AI Confidence</span>
-              <b>{confidence}%</b>
+          {analyzing ? (
+            <div className="ai-scanning-progress">
+              <div className="ai-pulse-bar">
+                <div className="ai-pulse-bar-fill"></div>
+              </div>
+              <div style={{ textAlign: "center", color: "#475569", fontSize: "13px", padding: "6px 0" }}>
+                <b>⚡ AI inference running on backend CPU...</b>
+                <p style={{ margin: "4px 0 0", color: "#64748b", fontSize: "12px" }}>
+                  The neural network is analyzing the evidence photo for cracks, spalling, and wiring hazards.
+                </p>
+              </div>
             </div>
-
-            <div>
-              <span>Severity</span>
-              <b>
-                {r.severity || "Unknown"}
-              </b>
-            </div>
-
-            <div>
-              <span>Priority Score</span>
-              <b>
-                {r.priority_score ?? 0}/100
-              </b>
-            </div>
-
-          </div>
-
-   
-<div className="scan-box">
-
-  {r.image_path ? (
-    <img
-      src={
-        r.image_path.startsWith("http")
-          ? r.image_path
-          : `https://broken-building-reporter-api.onrender.com/${r.image_path.replace(/^\/+/, "")}`
-      }
-      alt="Uploaded building damage"
-      style={{
-        width: "100%",
-        height: "100%",
-        maxHeight: "320px",
-        objectFit: "contain",
-        borderRadius: "12px"
-      }}
-      onError={(e) => {
-        e.currentTarget.alt = "Uploaded image could not be loaded";
-      }}
-    />
-  ) : (
-    <p>Uploaded image not available.</p>
-  )}
-
-  <span>
-    AI analyzed the uploaded evidence
-  </span>
-
-</div>
-       
-
-          {low ? (
-
-            <div className="warning-box">
-
-              <b>
-                ⚠ Inspection Required
-              </b>
-
-              <span>
-                AI confidence is low. Blur, poor
-                lighting, paint, plaster or
-                obstruction may hide visible damage.
-                A clearer image or professional
-                inspection is recommended.
-              </span>
-
-            </div>
-
           ) : (
-
-            <div className="recommendation">
-
-              <b>
-                ✓ AI Screening Completed
-              </b>
-
-              <span>
-                The system found visible evidence
-                matching the reported building defect.
-                Professional inspection is recommended
-                for final safety decisions.
-              </span>
-
-            </div>
-
-          )}
-
-          <div
-            className="card"
-            style={{ marginTop: "20px" }}
-          >
-
-            <h3>
-              Recommended Action
-            </h3>
-
-            <p>
-              {r.recommendation ||
-                "Have the reported defect reviewed by a qualified professional."}
-            </p>
-
-          </div>
-
-          <div
-            className="card"
-            style={{ marginTop: "20px" }}
-          >
-
-            <h3>
-              Report Information
-            </h3>
-
-            <div className="detail-grid">
+            <div className="metrics">
+              <div>
+                <span>AI Confidence</span>
+                <b>{confidence}%</b>
+              </div>
 
               <div>
+                <span>Severity</span>
+                <b>{r.severity || "Unknown"}</b>
+              </div>
+
+              <div>
+                <span>Priority Score</span>
+                <b>{r.priority_score ?? 0}/100</b>
+              </div>
+            </div>
+          )}
+
+          <div className="scan-box" style={{ position: "relative", overflow: "hidden" }}>
+            {imageSrc ? (
+              <img
+                src={imageSrc}
+                alt="Uploaded building damage"
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  maxHeight: "320px",
+                  objectFit: "contain",
+                  borderRadius: "12px"
+                }}
+                onError={(e) => {
+                  e.currentTarget.alt = "Uploaded image could not be loaded";
+                }}
+              />
+            ) : (
+              <p>Uploaded image not available.</p>
+            )}
+
+            <span>
+              {analyzing
+                ? "Backend neural network analyzing structural evidence..."
+                : "AI analyzed the uploaded evidence"}
+            </span>
+          </div>
+
+          {analysisError && (
+            <div className="warning-box" style={{ marginTop: "16px" }}>
+              <b>Notice:</b>
+              <span>{analysisError}</span>
+              <button
+                type="button"
+                className="secondary small"
+                style={{ marginTop: "8px", alignSelf: "flex-start" }}
+                onClick={() => {
+                  analysisTriggeredRef.current = false;
+                  fetchAndProcess();
+                }}
+              >
+                ↻ Retry AI Analysis
+              </button>
+            </div>
+          )}
+
+          {!analyzing && (
+            <>
+              {low ? (
+                <div className="warning-box">
+                  <b>⚠ Inspection Required</b>
+                  <span>
+                    AI confidence is low. Blur, poor lighting, paint, plaster or obstruction
+                    may hide visible damage. A clearer image or professional inspection is recommended.
+                  </span>
+                </div>
+              ) : (
+                <div className="recommendation">
+                  <b>✓ AI Screening Completed</b>
+                  <span>
+                    The system found visible evidence matching the reported building defect.
+                    Professional inspection is recommended for final safety decisions.
+                  </span>
+                </div>
+              )}
+
+              <div className="card" style={{ marginTop: "20px" }}>
+                <h3>Recommended Action</h3>
+                <p>
+                  {r.recommendation ||
+                    "Have the reported defect reviewed by a qualified professional."}
+                </p>
+              </div>
+            </>
+          )}
+
+          <div className="card" style={{ marginTop: "20px" }}>
+            <h3>Report Information</h3>
+
+            <div className="detail-grid">
+              <div>
                 <span>Report ID</span>
-                <b>
-                  {r.code || r.id}
-                </b>
+                <b>{r.code || r.id}</b>
               </div>
 
               <div>
                 <span>Damage Type</span>
-                <b>
-                  {r.damage_type}
-                </b>
+                <b>{r.damage_type}</b>
               </div>
 
               <div>
                 <span>Address</span>
-                <b>
-                  {r.address}
-                </b>
+                <b>{r.address}</b>
               </div>
 
               <div>
                 <span>Coordinates</span>
-                <b>
-                  {r.latitude}, {r.longitude}
-                </b>
+                <b>{r.latitude}, {r.longitude}</b>
               </div>
-
             </div>
-
           </div>
 
-          <div
-            className="info-banner"
-            style={{ marginTop: "20px" }}
-          >
-
-            <b>Important:</b> AI only evaluates
-            visible evidence. It does not determine
-            the final structural safety of a building.
-            Qualified professionals should make the
-            final safety decision.
-
+          <div className="info-banner" style={{ marginTop: "20px" }}>
+            <b>Important:</b> AI only evaluates visible evidence. It does not determine
+            the final structural safety of a building. Qualified professionals should make
+            the final safety decision.
           </div>
 
           <div className="button-row">
-
-            <button
-              className="secondary"
-              onClick={() => nav("/report")}
-            >
+            <button className="secondary" onClick={() => nav("/report")}>
               Analyze Another
             </button>
 
-            <button
-              className="primary"
-              onClick={() =>
-                nav(`/reports/${id}`)
-              }
-            >
+            <button className="primary" onClick={() => nav(`/reports/${id}`)}>
               View Full Report →
             </button>
-
           </div>
-
         </section>
-
       </div>
     </>
   );
@@ -1836,7 +1816,7 @@ function ReportDetails() {
         r.image_path.startsWith("http://") ||
         r.image_path.startsWith("https://")
           ? r.image_path
-          : `https://broken-building-reporter-api.onrender.com${r.image_path}`
+          : `${API.replace(/\/api$/, '')}/${r.image_path.replace(/^\/+/, '')}`
       }
       alt="Uploaded building damage"
       style={{

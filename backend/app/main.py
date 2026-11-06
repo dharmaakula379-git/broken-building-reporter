@@ -503,17 +503,17 @@ def upload_image(
         file.file.close()
 
     # Server-side safety optimization:
-    # If the image exceeds 1280px on longest edge, scale it down cleanly
-    # to save disk space and accelerate future decoding.
+    # If the image exceeds 1024px on longest edge, scale it down cleanly with fast bilinear
+    # resampling to save disk space and accelerate future decoding.
     try:
         from PIL import Image
         with Image.open(path) as img:
             w, h = img.size
-            if max(w, h) > 1280:
-                scale = 1280.0 / max(w, h)
-                resized = img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
+            if max(w, h) > 1024:
+                scale = 1024.0 / max(w, h)
+                resized = img.resize((int(w * scale), int(h * scale)), Image.Resampling.BILINEAR)
                 fmt = "PNG" if suffix == ".png" else "JPEG"
-                resized.convert("RGB").save(path, format=fmt, quality=85)
+                resized.convert("RGB").save(path, format=fmt, quality=80)
                 logger.info("Resized uploaded image %s to %dx%d", path.name, int(w * scale), int(h * scale))
     except Exception as e:
         logger.warning("Upload image optimization skipped: %s", e)
@@ -522,6 +522,11 @@ def upload_image(
     db.commit()
 
     return {"ok": True, "path": f"/uploads/{path.name}"}
+
+
+# Active in-flight analysis tracking to eliminate duplicate concurrent inference requests
+_in_flight_lock = threading.Lock()
+_in_flight_events: dict[int, threading.Event] = {}
 
 
 # Synchronous def ensures that waiting for the inference lock runs in Starlette's
@@ -540,17 +545,34 @@ def ai_analyze(rid: int, db: Session = Depends(get_db)):
         )
         return _cached_report_response(r)
 
+    # In-flight deduplication: If another thread or concurrent request is already analyzing
+    # THIS report, wait for it to complete rather than queuing a redundant inference job!
+    with _in_flight_lock:
+        if rid in _in_flight_events:
+            wait_event = _in_flight_events[rid]
+        else:
+            wait_event = None
+            _in_flight_events[rid] = threading.Event()
+
+    if wait_event is not None:
+        logger.info("REPORT %d analysis already in-flight. Waiting for active job...", rid)
+        wait_event.wait(timeout=90)
+        db.refresh(r)
+        return _cached_report_response(r)
+
     # Acquire inference lock to serialize CPU inference
     lock_start = time.perf_counter()
     acquired = _inference_lock.acquire(blocking=True, timeout=120)
     if not acquired:
         logger.error("INFERENCE LOCK TIMEOUT for report %d", rid)
+        with _in_flight_lock:
+            if rid in _in_flight_events:
+                _in_flight_events[rid].set()
+                del _in_flight_events[rid]
         raise HTTPException(503, "AI inference engine is busy. Please try again.")
 
     try:
         # Double-checked locking — Check 2: Re-query DB after acquiring lock.
-        # If another concurrent request analyzed this report while we were waiting
-        # in the queue, return the newly committed result immediately without running YOLO.
         db.refresh(r)
         if is_analysis_complete(r):
             lock_wait = time.perf_counter() - lock_start
@@ -567,6 +589,7 @@ def ai_analyze(rid: int, db: Session = Depends(get_db)):
             lock_already_acquired=True
         )
 
+        t_db = time.perf_counter()
         r.damage_type = result["damage_type"]
         r.confidence = result["confidence"]
         r.severity = result["severity"]
@@ -579,16 +602,25 @@ def ai_analyze(rid: int, db: Session = Depends(get_db)):
 
         db.commit()
         db.refresh(r)
+        db_ms = round((time.perf_counter() - t_db) * 1000, 2)
+        if "timings" in result:
+            result["timings"]["db_commit_ms"] = db_ms
+            logger.info("REPORT %d DB COMMIT: %.2fms", rid, db_ms)
 
         return {
             "report": report_dict(r),
             "recommendation": result["recommendation"],
+            "timings": result.get("timings", {}),
         }
     except Exception:
         db.rollback()
         raise
     finally:
         _inference_lock.release()
+        with _in_flight_lock:
+            if rid in _in_flight_events:
+                _in_flight_events[rid].set()
+                del _in_flight_events[rid]
 
 
 @app.put("/api/reports/{rid}/status")

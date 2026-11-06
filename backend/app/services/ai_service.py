@@ -48,30 +48,38 @@ def _detect_container_cpu_quota() -> int:
     if cfs_quota_cpus is not None:
         if cfs_quota_cpus <= 1.0:
             return 1
-        return max(1, min(2, int(round(cfs_quota_cpus))))
+        return max(1, min(4, int(round(cfs_quota_cpus))))
 
     # 3. Only if no cgroups quota is configured, inspect CPU affinity
     if hasattr(os, "sched_getaffinity"):
         try:
             affinity = len(os.sched_getaffinity(0))
             if affinity > 0:
-                return max(1, min(2, affinity))
+                return max(1, min(4, affinity))
         except Exception:
             pass
 
-    # 4. Fallback: clamp host core count to 1-2 threads
-    return max(1, min(2, (os.cpu_count() or 1)))
+    # 4. Fallback: clamp host core count to up to 4 threads for fast parallel CPU convolutions
+    return max(1, min(4, (os.cpu_count() or 1)))
 
 
+is_render = os.environ.get("RENDER", "").lower() in ("true", "1")
 detected_cpus = _detect_container_cpu_quota()
-# On Render free instance (0.15-0.5 CPU quota), limit to at most 2 threads to prevent thrashing
-num_threads = max(1, min(2, detected_cpus))
+
+# On Render free tier (fractional 0.15-0.5 CPU) or fractional cgroups, use strictly 1 thread
+# to prevent multi-threaded CFS context switching and kernel throttling.
+# On multi-core hosts outside Render, use up to 4 parallel threads.
+if is_render or (detected_cpus is not None and detected_cpus <= 1.0):
+    num_threads = 1
+else:
+    num_threads = max(1, min(4, (detected_cpus or os.cpu_count() or 1)))
+
 torch.set_num_threads(num_threads)
 torch.set_num_interop_threads(1)
 
 logger7 = logging.getLogger("uvicorn.error")
 
-# LOAD YOLO MODEL (loaded once at application startup)
+# LOAD YOLO MODEL (loaded ONCE at application startup, reused safely across all requests)
 MODEL_PATH7 = Path(__file__).resolve().parent.parent / "best.pt"
 
 if not MODEL_PATH7.is_file():
@@ -79,14 +87,27 @@ if not MODEL_PATH7.is_file():
 
 model7 = YOLO(str(MODEL_PATH7))
 
+# Fuse Conv2d + BatchNorm layers permanently to eliminate BatchNorm overhead on CPU
+try:
+    model7.fuse()
+    logger7.info("YOLO layers fused successfully (Conv2d + BatchNorm).")
+except Exception as e:
+    logger7.warning("Model fusion skipped: %s", e)
+
+try:
+    if hasattr(model7, "model") and hasattr(model7.model, "eval"):
+        model7.model.eval()
+except Exception:
+    pass
+
 logger7.info("YOLO MODEL TYPE: %s", model7.model.__class__.__name__)
 logger7.info("YOLO MODEL TASK: %s", model7.task)
 logger7.info("MODEL CONFIG: %s", getattr(model7.model, "yaml", "custom"))
 logger7.info("MODEL LAYERS: %s", len(getattr(model7.model, "model", [])))
 logger7.info("MODEL FILE SIZE: %.2f MB", MODEL_PATH7.stat().st_size / (1024 * 1024))
 logger7.info(
-    "CPU THREADS CONFIGURED: %d (detected container quota: %d, host cpus: %s)",
-    num_threads, detected_cpus, os.cpu_count()
+    "CPU THREADS CONFIGURED: %d (is_render: %s, detected quota: %s, host cpus: %s)",
+    num_threads, is_render, detected_cpus, os.cpu_count()
 )
 
 # Concurrency control: serialize CPU inference so multiple simultaneous requests
@@ -107,19 +128,19 @@ CLASS_MAP7 = {
 
 def warmup_model():
     """
-    Warms up the YOLO model with a lightweight synthetic image.
+    Warms up the YOLO model with a lightweight synthetic image at application startup.
     This triggers PyTorch kernel compilation, graph tracing, and memory allocator
     setup at startup so the first real user submission does not suffer cold-init delay.
     """
     try:
         import numpy as np
         t0 = time.perf_counter()
-        logger7.info("YOLO MODEL WARMUP INITIATING...")
+        logger7.info("YOLO MODEL WARMUP INITIATING (imgsz=320, conf=0.20, threads=%d)...", num_threads)
         dummy = np.zeros((320, 320, 3), dtype=np.uint8)
         with torch.inference_mode():
             model7.predict(
                 source=dummy,
-                conf=0.25,
+                conf=0.20,
                 imgsz=320,
                 device="cpu",
                 max_det=1,
@@ -131,24 +152,25 @@ def warmup_model():
         logger7.warning("YOLO model warmup encountered issue: %s", e)
 
 
-def _preprocess_image_source(image_path: Path) -> Union[Path, Image.Image]:
+def _preprocess_image_source(image_path: Path) -> Union[str, Path, Image.Image]:
     """
-    If the image is larger than 1280px on its longest dimension, downscale it cleanly
-    using PIL before inference. This drastically reduces CPU memory bandwidth and
-    decoding time without sacrificing thin crack or wire detail.
+    Ensures image is ready for YOLO inference. If the image exceeds 1024px,
+    resizes it cleanly with bilinear interpolation. If already optimized,
+    returns the file path directly for zero-copy C++ letterboxing.
     """
     try:
-        with Image.open(image_path) as img:
-            w, h = img.size
-            max_dim = max(w, h)
-            if max_dim > 1280:
-                scale = 1280.0 / max_dim
-                new_size = (int(w * scale), int(h * scale))
-                resized = img.resize(new_size, Image.Resampling.LANCZOS)
-                return resized.convert("RGB")
+        if image_path.stat().st_size > 1.5 * 1024 * 1024:
+            with Image.open(image_path) as img:
+                w, h = img.size
+                max_dim = max(w, h)
+                if max_dim > 1024:
+                    scale = 1024.0 / max_dim
+                    new_size = (int(w * scale), int(h * scale))
+                    resized = img.resize(new_size, Image.Resampling.BILINEAR)
+                    return resized.convert("RGB")
     except Exception as e:
-        logger7.warning("Optional pre-resizing skipped for %s: %s", image_path, e)
-    return image_path
+        logger7.warning("Pre-resizing skipped for %s: %s", image_path, e)
+    return str(image_path)
 
 
 def analyze_image(
@@ -158,9 +180,10 @@ def analyze_image(
     lock_already_acquired: bool = False
 ):
     total_start = time.perf_counter()
+    timings = {}
     logger7.info("========== YOLO DIAGNOSTICS ==========")
     logger7.info("Image path: %s", image_path)
-    logger7.info("Model classes: %s", model7.names)
+    logger7.info("Model classes: %s", getattr(model7, "names", {}))
     logger7.info("Selected damage: %s", damage_type)
 
     if not image_path or not Path(image_path).is_file():
@@ -170,7 +193,8 @@ def analyze_image(
             "confidence": 0,
             "severity": "Inspection Required",
             "priority_score": 45,
-            "recommendation": "Image unavailable. Professional inspection required."
+            "recommendation": "Image unavailable. Professional inspection required.",
+            "timings": {"total_ms": 0}
         }
 
     image_file = Path(image_path)
@@ -190,7 +214,8 @@ def analyze_image(
             "recommendation": (
                 "This damage category is not supported by the AI model. "
                 "Professional inspection required."
-            )
+            ),
+            "timings": {"total_ms": 0}
         }
 
     # Verify model contains the expected target class
@@ -209,11 +234,12 @@ def analyze_image(
 
     logger7.info("TARGET CLASS ID: %s (%s)", target_id, target_class)
 
-    # 1. Preprocessing Stage
+    # 1. Preprocessing Stage (Measured)
     prep_start = time.perf_counter()
     image_source = _preprocess_image_source(image_file)
     prep_time = time.perf_counter() - prep_start
-    logger7.info("STAGE 1 [PREPROCESSING]: %.3f seconds", prep_time)
+    timings["image_prep_ms"] = round(prep_time * 1000, 2)
+    logger7.info("STAGE 1 [PREPROCESSING]: %.3f seconds (%.2fms)", prep_time, timings["image_prep_ms"])
 
     # 2. Concurrency Lock: Ensure only one inference runs on CPU at a time
     need_release = False
@@ -225,28 +251,33 @@ def analyze_image(
             raise TimeoutError("Inference engine is currently busy with another request.")
         need_release = True
         lock_wait = time.perf_counter() - lock_start
+        timings["lock_wait_ms"] = round(lock_wait * 1000, 2)
         if lock_wait > 0.05:
             logger7.info("STAGE 2 [LOCK WAIT]: Waited %.3f seconds for CPU lock", lock_wait)
 
     try:
-        # 3. YOLO Inference Stage
+        # 3. YOLO Inference Stage (Measured)
         infer_start = time.perf_counter()
-        logger7.info("STAGE 3 [YOLO INFERENCE STARTED] (imgsz=320, conf=0.25, threads=%d)", num_threads)
+        logger7.info(
+            "STAGE 3 [YOLO INFERENCE STARTED] (imgsz=320, conf=0.20, max_det=10, threads=%d)",
+            num_threads
+        )
 
         with torch.inference_mode():
             results = model7.predict(
                 source=image_source,
-                conf=0.25,
-                imgsz=320,
+                conf=0.20,         # Captures thin cracks and exposed wires reliably
+                imgsz=320,         # 320x320 optimal lightweight resolution for CPU
                 device="cpu",
-                max_det=20,
+                max_det=10,        # Sufficient for infrastructure defect inspection
                 verbose=False
             )
 
         infer_time = time.perf_counter() - infer_start
-        logger7.info("STAGE 3 [YOLO INFERENCE COMPLETED] in %.2f seconds", infer_time)
+        timings["yolo_infer_ms"] = round(infer_time * 1000, 2)
+        logger7.info("STAGE 3 [YOLO INFERENCE COMPLETED] in %.3f seconds (%.2fms)", infer_time, timings["yolo_infer_ms"])
 
-        # 4. Postprocessing Stage: Parse bounding boxes & detections
+        # 4. Postprocessing Stage (Measured)
         post_start = time.perf_counter()
         detections = []
 
@@ -285,7 +316,8 @@ def analyze_image(
         logger7.info("FINAL CONFIDENCE: %.2f%%", confidence)
 
         post_time = time.perf_counter() - post_start
-        logger7.info("STAGE 4 [POSTPROCESSING]: %.3f seconds", post_time)
+        timings["postprocess_ms"] = round(post_time * 1000, 2)
+        logger7.info("STAGE 4 [POSTPROCESSING]: %.3f seconds (%.2fms)", post_time, timings["postprocess_ms"])
 
         # Classify severity and priority score
         if confidence >= 70:
@@ -314,7 +346,8 @@ def analyze_image(
         )
 
         total_elapsed = time.perf_counter() - total_start
-        logger7.info("STAGE 5 [TOTAL ANALYSIS PIPELINE]: %.2f seconds", total_elapsed)
+        timings["total_ms"] = round(total_elapsed * 1000, 2)
+        logger7.info("STAGE 5 [TOTAL ANALYSIS PIPELINE]: %.3f seconds (%.2fms)", total_elapsed, timings["total_ms"])
         logger7.info("======================================")
 
         return {
@@ -323,7 +356,8 @@ def analyze_image(
             "severity": severity,
             "priority_score": priority_score,
             "recommendation": recommendation,
-            "elapsed_seconds": round(total_elapsed, 2)
+            "elapsed_seconds": round(total_elapsed, 2),
+            "timings": timings
         }
 
     except Exception:
