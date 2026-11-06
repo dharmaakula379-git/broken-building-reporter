@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import {
   NavLink,
   Route,
@@ -543,6 +543,58 @@ function RecentReports() {
   );
 }
 
+function compressImageForUpload(file, maxDimension = 1280, quality = 0.85) {
+  return new Promise((resolve) => {
+    if (!file || !file.type.startsWith("image/") || file.size < 400 * 1024) {
+      return resolve(file);
+    }
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let { width, height } = img;
+      if (width <= maxDimension && height <= maxDimension) {
+        return resolve(file);
+      }
+      if (width > height) {
+        if (width > maxDimension) {
+          height = Math.round((height * maxDimension) / width);
+          width = maxDimension;
+        }
+      } else {
+        if (height > maxDimension) {
+          width = Math.round((width * maxDimension) / height);
+          height = maxDimension;
+        }
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0, width, height);
+      canvas.toBlob(
+        (blob) => {
+          if (!blob || blob.size >= file.size) {
+            return resolve(file);
+          }
+          const compressed = new File([blob], file.name.replace(/\.[^.]+$/, ".jpg"), {
+            type: "image/jpeg",
+            lastModified: Date.now()
+          });
+          resolve(compressed);
+        },
+        "image/jpeg",
+        quality
+      );
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      resolve(file);
+    };
+    img.src = url;
+  });
+}
+
 function ReportDamage() {
 
   const nav = useNavigate();
@@ -559,6 +611,18 @@ function ReportDamage() {
   const [preview, setPreview] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  const isSubmittingRef = useRef(false);
+  const [stepMsg, setStepMsg] = useState("");
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    let timer;
+    if (busy) {
+      setElapsed(0);
+      timer = setInterval(() => setElapsed((prev) => prev + 1), 1000);
+    }
+    return () => clearInterval(timer);
+  }, [busy]);
 
   function handleFile(e) {
 
@@ -623,6 +687,10 @@ function ReportDamage() {
 
     e.preventDefault();
 
+    if (isSubmittingRef.current || busy) {
+      return;
+    }
+
     if (!file) {
       setMsg(
         "Please upload a building image first."
@@ -637,8 +705,10 @@ function ReportDamage() {
       return;
     }
 
+    isSubmittingRef.current = true;
     setBusy(true);
     setMsg("");
+    setStepMsg("Optimizing image and creating report...");
 
     try {
 
@@ -653,8 +723,10 @@ function ReportDamage() {
         body: JSON.stringify(body)
       });
 
+      setStepMsg("Uploading photo...");
+      const fileToUpload = await compressImageForUpload(file);
       const fd = new FormData();
-      fd.append("file", file);
+      fd.append("file", fileToUpload);
 
       const imageResponse = await fetch(
   `${API}/reports/${r.id}/image`,
@@ -671,6 +743,7 @@ if (!imageResponse.ok) {
   );
 }
 
+      setStepMsg("Running AI damage detection (typically 20–45s)...");
       await api(
         `/ai/analyze/${r.id}`,
         {
@@ -690,6 +763,8 @@ if (!imageResponse.ok) {
     } finally {
 
       setBusy(false);
+      isSubmittingRef.current = false;
+      setStepMsg("");
 
     }
   }
@@ -923,7 +998,7 @@ if (!imageResponse.ok) {
           disabled={busy}
         >
           {busy
-            ? "Analyzing..."
+            ? (stepMsg ? `${stepMsg} (${elapsed}s)` : `Analyzing... (${elapsed}s)`)
             : "✦ Analyze & Submit Report"}
         </button>
 

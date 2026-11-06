@@ -1,46 +1,79 @@
+import logging
+import os
+import shutil
+import time
+from contextlib import asynccontextmanager
+from datetime import datetime
+from pathlib import Path
 
-from fastapi import FastAPI, Depends, UploadFile, File, HTTPException
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from pathlib import Path
-from datetime import datetime
-import shutil
-import os
 
 from .db import Base, engine, get_db
 from .models import Building, Report
 from .seed import seed
-from .services.ai_service import analyze_image
+from .services.ai_service import analyze_image, warmup_model
+
+logger = logging.getLogger("uvicorn.error")
+
+UPLOADS = Path("uploads")
+UPLOADS.mkdir(parents=True, exist_ok=True)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Initialize database tables and seed data at startup
+    Base.metadata.create_all(bind=engine)
+    seed()
+    # Warm up YOLO model at startup so first real request is fast
+    warmup_model()
+    yield
+
 
 app = FastAPI(
     title="Broken Building Reporter API",
-    version="1.0"
+    version="1.0",
+    lifespan=lifespan
 )
 
-# Allow the deployed Vercel frontend and local development.
+# HTTP Request timing middleware
+@app.middleware("http")
+async def add_timing_header(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    elapsed = time.perf_counter() - start
+    response.headers["X-Process-Time"] = f"{elapsed:.3f}s"
+    if elapsed > 1.0 or request.url.path.startswith("/api/ai"):
+        logger.info(
+            "HTTP TIMING: %s %s completed in %.2fs (status %d)",
+            request.method,
+            request.url.path,
+            elapsed,
+            response.status_code
+        )
+    return response
+
+
+# Allow the deployed Vercel frontend, preview domains, and local development.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://broken-building-reporter.vercel.app",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://localhost:3000",
     ],
+    allow_origin_regex=r"https://.*broken-building-reporter.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-UPLOADS = Path("uploads")
-UPLOADS.mkdir(parents=True, exist_ok=True)
-
 # Make uploaded images accessible through /uploads/<filename>.
 app.mount("/uploads", StaticFiles(directory=str(UPLOADS)), name="uploads")
-
-# Initialize database tables and demo seed data.
-Base.metadata.create_all(bind=engine)
-seed()
 
 
 class ReportCreate(BaseModel):
@@ -184,6 +217,22 @@ async def upload_image(
     finally:
         await file.close()
 
+    # Server-side safety optimization:
+    # If the image exceeds 1280px on longest edge, scale it down cleanly
+    # to save disk space and accelerate future decoding.
+    try:
+        from PIL import Image
+        with Image.open(path) as img:
+            w, h = img.size
+            if max(w, h) > 1280:
+                scale = 1280.0 / max(w, h)
+                resized = img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
+                fmt = "PNG" if suffix == ".png" else "JPEG"
+                resized.convert("RGB").save(path, format=fmt, quality=85)
+                logger.info("Resized uploaded image %s to %dx%d", path.name, int(w * scale), int(h * scale))
+    except Exception as e:
+        logger.warning("Upload image optimization skipped: %s", e)
+
     r.image_path = str(path)
     db.commit()
 
@@ -195,6 +244,26 @@ def ai_analyze(rid: int, db: Session = Depends(get_db)):
     r = db.query(Report).filter(Report.id == rid).first()
     if not r:
         raise HTTPException(404, "Report not found")
+
+    # Idempotency / Cache check:
+    # If report was already analyzed, return cached result immediately
+    # rather than triggering a redundant 30-40s YOLO inference.
+    if r.confidence is not None and r.status in ("AI Verified", "Inspection Required"):
+        logger.info(
+            "REPORT %d ALREADY ANALYZED: Returning cached result (confidence=%s%%, status=%s)",
+            rid, r.confidence, r.status
+        )
+        recommendation = (
+            "YOLO detected the reported damage. Professional inspection recommended."
+            if (r.confidence or 0) > 0
+            else
+            "No matching damage detected. Professional inspection required."
+        )
+        return {
+            "report": report_dict(r),
+            "recommendation": recommendation,
+            "cached": True
+        }
 
     result = analyze_image(
         r.image_path,
