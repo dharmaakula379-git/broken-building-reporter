@@ -595,6 +595,42 @@ function compressImageForUpload(file, maxDimension = 1280, quality = 0.85) {
   });
 }
 
+const geocodeCache = new Map();
+
+async function fetchGeocode(query, signal) {
+  const normKey = query.trim().toLowerCase();
+  if (geocodeCache.has(normKey)) {
+    return geocodeCache.get(normKey);
+  }
+
+  // All geocoding requests route strictly through the backend proxy.
+  // Respects backend rate limiting, server-side caching, and User-Agent policy.
+  try {
+    const res = await fetch(`${API}/geocode?q=${encodeURIComponent(query)}`, {
+      signal,
+      headers: { Accept: "application/json" }
+    });
+    if (res.ok) {
+      const data = await res.json();
+      geocodeCache.set(normKey, data);
+      return data;
+    } else {
+      return {
+        found: false,
+        error: "Geocoding service unavailable. You can enter coordinates manually below.",
+        address: query
+      };
+    }
+  } catch (err) {
+    if (err.name === "AbortError") throw err;
+    return {
+      found: false,
+      error: "Unable to connect to geocoding server. You can enter coordinates manually below.",
+      address: query
+    };
+  }
+}
+
 function ReportDamage() {
 
   const nav = useNavigate();
@@ -614,6 +650,125 @@ function ReportDamage() {
   const isSubmittingRef = useRef(false);
   const [stepMsg, setStepMsg] = useState("");
   const [elapsed, setElapsed] = useState(0);
+
+  // Address geocoding states
+  const [geoLoading, setGeoLoading] = useState(false);
+  const [geoStatus, setGeoStatus] = useState({
+    type: "idle",
+    message: ""
+  });
+  const lastGeocodedAddressRef = useRef("MG Road, Vijayawada");
+  const manualCoordsRef = useRef(false);
+  const geocodeAbortRef = useRef(null);
+  const latestAddressRef = useRef("MG Road, Vijayawada");
+
+  // Keep latestAddressRef in sync with current address
+  useEffect(() => {
+    latestAddressRef.current = form.address.trim();
+  }, [form.address]);
+
+  // Debounced address geocoding effect (800ms debounce)
+  useEffect(() => {
+    const query = form.address.trim();
+
+    if (query.length < 3) {
+      if (geocodeAbortRef.current) {
+        geocodeAbortRef.current.abort();
+        geocodeAbortRef.current = null;
+      }
+      setGeoLoading(false);
+      if (query.length === 0) {
+        setGeoStatus({ type: "idle", message: "" });
+      } else {
+        setGeoStatus({
+          type: "info",
+          message: "Enter at least 3 characters to search coordinates."
+        });
+      }
+      return;
+    }
+
+    if (
+      query === lastGeocodedAddressRef.current &&
+      !manualCoordsRef.current
+    ) {
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      // Abort any prior in-flight request before creating a new one
+      if (geocodeAbortRef.current) {
+        geocodeAbortRef.current.abort();
+      }
+      const controller = new AbortController();
+      geocodeAbortRef.current = controller;
+
+      setGeoLoading(true);
+      setGeoStatus({
+        type: "loading",
+        message: "Searching coordinates for address..."
+      });
+
+      try {
+        const result = await fetchGeocode(query, controller.signal);
+
+        // Strict guard: verify this request was NOT aborted AND still matches the latest entered address
+        if (controller.signal.aborted || latestAddressRef.current !== query) {
+          return;
+        }
+
+        if (result.found) {
+          setForm(prev => {
+            if (prev.address.trim() === query) {
+              return {
+                ...prev,
+                latitude: String(result.latitude),
+                longitude: String(result.longitude)
+              };
+            }
+            return prev;
+          });
+          lastGeocodedAddressRef.current = query;
+          manualCoordsRef.current = false;
+          const shortName = result.display_name
+            ? (result.display_name.length > 55
+                ? result.display_name.slice(0, 52) + "..."
+                : result.display_name)
+            : `${result.latitude}, ${result.longitude}`;
+          setGeoStatus({
+            type: "success",
+            message: `Coordinates located: ${shortName}`
+          });
+        } else {
+          setGeoStatus({
+            type: "error",
+            message:
+              result.message ||
+              result.error ||
+              "Could not find coordinates for this address. Please verify or enter manually."
+          });
+        }
+      } catch (err) {
+        if (err.name !== "AbortError" && latestAddressRef.current === query) {
+          setGeoStatus({
+            type: "error",
+            message: "Unable to contact geocoding service. Please enter coordinates manually."
+          });
+        }
+      } finally {
+        if (!controller.signal.aborted && latestAddressRef.current === query) {
+          setGeoLoading(false);
+        }
+      }
+    }, 800);
+
+    return () => {
+      clearTimeout(timer);
+      if (geocodeAbortRef.current) {
+        geocodeAbortRef.current.abort();
+      }
+    };
+  }, [form.address]);
 
   useEffect(() => {
     let timer;
@@ -701,6 +856,44 @@ function ReportDamage() {
     if (!form.description.trim()) {
       setMsg(
         "Please describe the visible problem."
+      );
+      return;
+    }
+
+    if (!form.address.trim()) {
+      setMsg(
+        "Please enter the building address."
+      );
+      return;
+    }
+
+    if (geoLoading) {
+      setMsg(
+        "Address lookup is currently in progress. Please wait for coordinates to update."
+      );
+      return;
+    }
+
+    const currentAddr = form.address.trim();
+    const addressChanged = currentAddr !== lastGeocodedAddressRef.current;
+    if (addressChanged && !manualCoordsRef.current) {
+      setMsg(
+        "Coordinates do not match the entered address. Please wait for lookup or enter coordinates manually."
+      );
+      return;
+    }
+
+    const latVal = Number(form.latitude);
+    const lonVal = Number(form.longitude);
+    if (isNaN(latVal) || latVal < -90 || latVal > 90) {
+      setMsg(
+        "Please provide a valid latitude between -90 and 90."
+      );
+      return;
+    }
+    if (isNaN(lonVal) || lonVal < -180 || lonVal > 180) {
+      setMsg(
+        "Please provide a valid longitude between -180 and 180."
       );
       return;
     }
@@ -886,13 +1079,25 @@ if (!imageResponse.ok) {
 
             <input
               value={form.address}
-              onChange={e =>
+              placeholder="e.g. MG Road, Vijayawada"
+              onChange={e => {
                 setForm({
                   ...form,
                   address: e.target.value
-                })
-              }
+                });
+                manualCoordsRef.current = false;
+              }}
             />
+
+            {geoStatus.message && (
+              <div className={`geo-status-box ${geoStatus.type}`}>
+                {geoLoading && <span className="geo-spinner" />}
+                {geoStatus.type === "success" && "✓ "}
+                {geoStatus.type === "error" && "⚠ "}
+                {geoStatus.type === "info" && "ℹ "}
+                <span>{geoStatus.message}</span>
+              </div>
+            )}
 
           </label>
 
@@ -901,12 +1106,17 @@ if (!imageResponse.ok) {
 
             <input
               value={form.latitude}
-              onChange={e =>
+              onChange={e => {
                 setForm({
                   ...form,
                   latitude: e.target.value
-                })
-              }
+                });
+                manualCoordsRef.current = true;
+                setGeoStatus({
+                  type: "info",
+                  message: "Latitude edited manually."
+                });
+              }}
             />
 
           </label>
@@ -916,12 +1126,17 @@ if (!imageResponse.ok) {
 
             <input
               value={form.longitude}
-              onChange={e =>
+              onChange={e => {
                 setForm({
                   ...form,
                   longitude: e.target.value
-                })
-              }
+                });
+                manualCoordsRef.current = true;
+                setGeoStatus({
+                  type: "info",
+                  message: "Longitude edited manually."
+                });
+              }}
             />
 
           </label>
@@ -957,7 +1172,15 @@ if (!imageResponse.ok) {
             </b>
 
             <span>
-              {form.latitude}, {form.longitude}
+              {geoLoading
+                ? "Locating address coordinates..."
+                : `${form.latitude}, ${form.longitude}${
+                    geoStatus.type === "success"
+                      ? " (auto-located)"
+                      : manualCoordsRef.current
+                      ? " (manual override)"
+                      : ""
+                  }`}
             </span>
 
           </div>
@@ -967,14 +1190,21 @@ if (!imageResponse.ok) {
             className="secondary"
             onClick={() =>
               navigator.geolocation?.getCurrentPosition(
-                p =>
-                  setForm({
-                    ...form,
-                    latitude:
-                      p.coords.latitude.toFixed(6),
-                    longitude:
-                      p.coords.longitude.toFixed(6)
-                  }),
+                p => {
+                  const latStr = p.coords.latitude.toFixed(6);
+                  const lonStr = p.coords.longitude.toFixed(6);
+                  setForm(prev => ({
+                    ...prev,
+                    latitude: latStr,
+                    longitude: lonStr
+                  }));
+                  manualCoordsRef.current = true;
+                  lastGeocodedAddressRef.current = form.address.trim();
+                  setGeoStatus({
+                    type: "info",
+                    message: "Device GPS location applied."
+                  });
+                },
                 () =>
                   setMsg(
                     "Unable to access your location. Please enter it manually."

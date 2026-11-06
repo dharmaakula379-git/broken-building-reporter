@@ -1,7 +1,12 @@
+import json
 import logging
 import os
 import shutil
+import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -137,6 +142,101 @@ def root():
 @app.get("/api/health")
 def health():
     return {"ok": True}
+
+
+_geocode_cache: dict = {}
+_geocode_lock = threading.Lock()
+_last_nominatim_time = 0.0
+
+
+@app.get("/api/geocode")
+def geocode_address(q: str = ""):
+    """
+    Geocodes a street or building address to latitude and longitude using
+    OpenStreetMap Nominatim, respecting usage policies (1 req/sec limit,
+    custom User-Agent, and query caching).
+    """
+    clean_q = (q or "").strip()
+    if not clean_q or len(clean_q) < 3:
+        return {
+            "found": False,
+            "message": "Address query must be at least 3 characters long.",
+            "address": clean_q,
+        }
+
+    norm_key = " ".join(clean_q.lower().split())
+    if norm_key in _geocode_cache:
+        return {**_geocode_cache[norm_key], "cached": True}
+
+    with _geocode_lock:
+        # Double check cache inside lock
+        if norm_key in _geocode_cache:
+            return {**_geocode_cache[norm_key], "cached": True}
+
+        # Respect OpenStreetMap Nominatim 1 request/second rate limit
+        global _last_nominatim_time
+        now = time.time()
+        elapsed = now - _last_nominatim_time
+        if elapsed < 1.0:
+            time.sleep(1.0 - elapsed)
+        _last_nominatim_time = time.time()
+
+        params = urllib.parse.urlencode({
+            "q": clean_q,
+            "format": "json",
+            "limit": 1,
+            "addressdetails": 0
+        })
+        url = f"https://nominatim.openstreetmap.org/search?{params}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "BrokenBuildingReporter/1.0 (contact: admin@brokenbuildingreporter.local)",
+                "Accept-Language": "en"
+            }
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=6.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            logger.warning("Geocoding request failed for %r: %s", clean_q, exc)
+            return {
+                "found": False,
+                "error": "Geocoding service unavailable. You can enter coordinates manually.",
+                "address": clean_q
+            }
+
+        if isinstance(data, list) and len(data) > 0:
+            item = data[0]
+            try:
+                lat = round(float(item["lat"]), 6)
+                lon = round(float(item["lon"]), 6)
+                result = {
+                    "found": True,
+                    "latitude": lat,
+                    "longitude": lon,
+                    "display_name": item.get("display_name", clean_q),
+                    "address": clean_q
+                }
+            except (ValueError, KeyError) as e:
+                logger.warning("Failed parsing Nominatim response: %s", e)
+                return {
+                    "found": False,
+                    "message": "Could not parse coordinates from geocoding service.",
+                    "address": clean_q
+                }
+        else:
+            result = {
+                "found": False,
+                "message": f"Could not find coordinates for '{clean_q}'. Please verify or enter coordinates manually.",
+                "address": clean_q
+            }
+
+        if len(_geocode_cache) > 500:
+            _geocode_cache.clear()
+        _geocode_cache[norm_key] = result
+        return result
 
 
 def report_dict(r):
