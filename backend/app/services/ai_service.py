@@ -148,15 +148,14 @@ def analyze_image(
         target_id7
     )
 
-    try:
-
+      try:
         # Start inference timer
         start_time7 = time.perf_counter()
 
         logger7.info("YOLO INFERENCE STARTED")
 
         # Optimized diagnostic inference
-               results7 = model7.predict(
+        results7 = model7.predict(
             source=str(image7),
             conf=0.25,
             imgsz=320,
