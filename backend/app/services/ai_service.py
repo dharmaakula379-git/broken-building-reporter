@@ -156,10 +156,10 @@ def analyze_image(
         logger7.info("YOLO INFERENCE STARTED")
 
         # Optimized diagnostic inference
-        results7 = model7.predict(
+               results7 = model7.predict(
             source=str(image7),
-            conf=0.01,
-            imgsz=256,
+            conf=0.25,
+            imgsz=320,
             device="cpu",
             max_det=20,
             verbose=False
