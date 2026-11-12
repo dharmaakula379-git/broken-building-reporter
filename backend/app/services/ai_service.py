@@ -326,7 +326,7 @@ def analyze_image(
                 )
                 draw.text((x1 + 1, max(0, y1 - 22)), label, fill=(255, 255, 255))
 
-            out_dir = output_annotated_dir or img_file.parent
+            out_dir = Path(output_annotated_dir) if output_annotated_dir else img_file.parent
             out_file = out_dir / f"annotated_{img_file.name}"
             im.save(out_file, quality=90)
             annotated_rel_path = str(out_file).replace("\\", "/")

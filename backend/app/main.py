@@ -315,6 +315,16 @@ async def upload_image(rid: int, file: UploadFile = File(...), db: Session = Dep
     with dest_path.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
         
+    # Smart resize for ultra-fast YOLO inference (reduces megapixel photos to max 1280px)
+    try:
+        from PIL import Image
+        with Image.open(dest_path) as img:
+            if max(img.size) > 1280:
+                img.thumbnail((1280, 1280), Image.Resampling.LANCZOS)
+                img.save(dest_path, quality=85, optimize=True)
+    except Exception as opt_err:
+        print(f"Image optimization notice: {opt_err}")
+        
     r.image_path = str(dest_path)
     r.updated_at = datetime.utcnow()
     db.commit()
