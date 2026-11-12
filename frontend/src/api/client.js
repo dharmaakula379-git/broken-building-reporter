@@ -1,4 +1,7 @@
-const BACKEND_URL = (import.meta.env.VITE_API_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
+const envUrl = import.meta.env.VITE_API_URL;
+const defaultUrl = import.meta.env.DEV ? "http://127.0.0.1:8000" : "https://broken-building-reporter-api.onrender.com";
+const rawUrl = (envUrl || defaultUrl).trim().replace(/\/$/, "");
+const BACKEND_URL = rawUrl.endsWith("/api") ? rawUrl.slice(0, -4) : rawUrl;
 const API_BASE = `${BACKEND_URL}/api`;
 export const UPLOADS_BASE = BACKEND_URL;
 

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
@@ -56,6 +56,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Resilient middleware to handle clients configured with /api in baseUrl (prevents /api/api 404)
+@app.middleware("http")
+async def fix_double_api_middleware(request: Request, call_next):
+    if request.url.path.startswith("/api/api/"):
+        new_path = request.url.path.replace("/api/api/", "/api/", 1)
+        request.scope["path"] = new_path
+    response = await call_next(request)
+    return response
 
 def report_dict(r: Report) -> dict:
     image_url = f"/uploads/{Path(r.image_path).name}" if r.image_path and Path(r.image_path).is_file() else None
