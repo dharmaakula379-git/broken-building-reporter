@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "smtp_server": "smtp.gmail.com",
+  "smtp_port": 587,
+  "use_tls": true,
+  "sender_email": "alerts@vijayawada-civic.gov.in",
+  "sender_name": "Vijayawada Civic Safety & Structural Damage Reporter",
+  "smtp_user": "",
+  "smtp_password": "",
+  "default_citizen_email": "rajesh.citizen@gmail.com",
+  "default_authority_email": "k.ramesh.safety@vijayawada.gov.in",
+  "admin_alert_email": "commissioner.vmc@ap.gov.in"
+}

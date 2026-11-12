@@ -24,6 +24,9 @@ Thumbs.db
 
 # Logs
 *.log
+backend/sent_emails/*.html
+backend/sent_emails/*.json
+!backend/sent_emails/.gitkeep
 
 # Environment
 .env
