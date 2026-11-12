@@ -90,8 +90,12 @@ export default function ReportDamage() {
         await api.uploadReportImage(report.id, file);
       }
 
-      // 3. Trigger AI YOLO analysis
-      await api.analyzeReport(report.id);
+      // 3. Trigger AI YOLO analysis (with graceful fallback if cloud proxy times out)
+      try {
+        await api.analyzeReport(report.id);
+      } catch (aiErr) {
+        console.warn("AI analysis network delay (proceeding to report view):", aiErr);
+      }
 
       // 4. Redirect to AI Analysis result view
       navigate(`/analysis/${report.id}`);
