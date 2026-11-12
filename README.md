@@ -1,5 +1,15 @@
 # Broken Building Reporter 2.0 — Full-Stack Civic Safety Web App
 
+[![Live Web Application](https://img.shields.io/badge/Live%20App-broken--building--reporter.vercel.app-4f46e5?style=for-the-badge&logo=vercel&logoColor=white)](https://broken-building-reporter.vercel.app)
+[![Backend API](https://img.shields.io/badge/Render%20API-Live%20Backend-000000?style=for-the-badge&logo=render&logoColor=white)](https://broken-building-reporter-api.onrender.com)
+[![Swagger Docs](https://img.shields.io/badge/API%20Docs-Interactive%20Swagger-059669?style=for-the-badge&logo=fastapi&logoColor=white)](https://broken-building-reporter-api.onrender.com/docs)
+
+> 🌐 **Live Web Application (Vercel)**: **[https://broken-building-reporter.vercel.app](https://broken-building-reporter.vercel.app)**  
+> ⚡ **Cloud Backend API (Render)**: **[https://broken-building-reporter-api.onrender.com](https://broken-building-reporter-api.onrender.com)**  
+> 📖 **Interactive API Documentation**: **[https://broken-building-reporter-api.onrender.com/docs](https://broken-building-reporter-api.onrender.com/docs)**
+
+---
+
 A production-ready full-stack civic safety platform for reporting, analyzing, tracking, and escalating visible building infrastructure hazards.
 
 ## Tech Stack
