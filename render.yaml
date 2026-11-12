@@ -11,6 +11,12 @@ services:
         value: 3.11.9
       - key: PORT
         value: 8000
+      - key: OMP_NUM_THREADS
+        value: "1"
+      - key: MKL_NUM_THREADS
+        value: "1"
+      - key: MALLOC_ARENA_MAX
+        value: "2"
 
   # 2. React Vite Frontend Static Site
   - type: web

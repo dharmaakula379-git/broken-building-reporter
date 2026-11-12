@@ -7,23 +7,33 @@ and automated engineering recommendations.
 
 from pathlib import Path
 import json
+import os
+import gc
 from typing import Dict, Any, List, Optional
 from PIL import Image, ImageDraw, ImageFont
 import cv2
 import numpy as np
-from ultralytics import YOLO
 
-# Load trained YOLO model once
+# Load trained YOLO model lazily to stay well below 512MB RAM cap on Render
 MODEL_PATH = Path(__file__).resolve().parent.parent / "best.pt"
 _model = None
 
-def get_model() -> YOLO:
+def get_model():
     global _model
     if _model is None:
-        if MODEL_PATH.is_file():
-            _model = YOLO(str(MODEL_PATH))
-        else:
+        if not MODEL_PATH.is_file():
             raise FileNotFoundError(f"YOLO weights not found at {MODEL_PATH}")
+        # Enforce single thread and disable gradients to fit inside 512MB containers
+        os.environ["OMP_NUM_THREADS"] = "1"
+        os.environ["MKL_NUM_THREADS"] = "1"
+        try:
+            import torch
+            torch.set_num_threads(1)
+            torch.set_grad_enabled(False)
+        except Exception:
+            pass
+        from ultralytics import YOLO
+        _model = YOLO(str(MODEL_PATH))
     return _model
 
 # Map user-facing damage types to YOLO classes
@@ -401,6 +411,12 @@ def analyze_image(
     # Note cross-category discrepancy if citizen reported differently
     if detections and target_class and primary_hazard != target_class:
         recommendation += f" (Note: Citizen selected '{damage_type}', AI detected '{hazard_label}')."
+
+    # Force garbage collection to prevent memory ballooning in 512MB RAM environments
+    try:
+        gc.collect()
+    except Exception:
+        pass
 
     return {
         "damage_type": damage_type,

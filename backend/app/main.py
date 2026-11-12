@@ -1,3 +1,8 @@
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["MALLOC_ARENA_MAX"] = "2"
+
 from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -6,8 +11,6 @@ from pathlib import Path
 from datetime import datetime, timedelta
 import shutil
 import json
-
-import os
 from .db import Base, engine, get_db
 from .models import Building, Report, Notification, AuditLog
 from .schemas import (
